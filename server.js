@@ -21,6 +21,9 @@ function getCurrentIntervalState() {
         progressInBlock: minuteInHour
     };
 }
+app.get('/', (req, res) => {
+  res.send('Site Sync Server is live and running!');
+});
 
 wss.on('connection', (ws) => {
     ws.send(JSON.stringify({ type: 'SYNC', data: getCurrentIntervalState() }));
