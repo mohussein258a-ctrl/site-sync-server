@@ -30,7 +30,8 @@ wss.on('connection', (ws) => {
 });
 
 setInterval(() => {
-    const stateData = JSON.stringify({ type: 'TICK', data: getCurrentIntervalState() });
+    const currentState = getCurrentIntervalState();
+    const stateData = JSON.stringify({ type: 'SYNC_STATE', ...currentState });
     wss.clients.forEach((client) => {
         if (client.readyState === 1) {
             client.send(stateData);
