@@ -75,12 +75,15 @@ runGameLoop();
 
 // 3. CREATE THE AUTOMATIC CHAT BOT
 const botMessages = [
-    "Bot_Alex: Just cashed out 500 KES! 💸",
-    "Bot_Sarah: Waiting for 10x 🚀",
-    "Bot_Kevo: Wow, crashed so fast 😭",
-    "Bot_Mike: Let's goooo!",
-    "Bot_Joy: Who is betting high this round?",
-    "Bot_Mwangi: Nice win right there."
+    "Alex: Just cashed out 500 KES! 💸",
+    "Sarah: Waiting for 10x 🚀",
+    "Kevo: Wow, crashed so fast 😭",
+    "Mike: Let's goooo!",
+    "Joy: Who is betting high this round?",
+    "Mwangi: Nice win right there." ,
+    "mwendee: what a day 🎉." ,
+    "walalka: waiting for the signals." ,
+    "katana: just received the withdrawal😜." ,
 ];
 
 // Send a random bot message every 3 seconds
