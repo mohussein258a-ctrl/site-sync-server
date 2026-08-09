@@ -62,6 +62,10 @@ runGameLoop();
 io.on("connection", (socket) => {
     console.log(`Player connected: ${socket.id}`);
     socket.emit("sync", gameState);
+        socket.on("chat message", (data) => {
+        console.log(`Chat message: ${data}`);
+        io.emit("chat message", data);
+    });
 
     socket.on("disconnect", () => {
         console.log(`Player disconnected: ${socket.id}`);
