@@ -20,22 +20,47 @@ let gameState = {
     isFlying: false
 };
 
-// 1. ADD HISTORY TRACKING
-// We'll seed it with some initial values so the ribbon isn't empty on server start
+// Seeded history array
 let oddsHistory = [1.06, 2.19, 5.51, 1.45, 3.20]; 
 
-function determineCrashPoint() {
-    const now = new Date();
-    const currentMinute = now.getMinutes();
-    
-    // High odd every 20 minutes
-    if (currentMinute % 20 === 0) {
-        return parseFloat((Math.random() * 15 + 10).toFixed(2));
+// --- 20-MINUTE SIGNAL OVERRIDE ENGINE ---
+let intervalCount = 0;
+let forcedRoundsRemaining = 0;
+let targetMinMultiplier = 1.00;
+
+// Timer runs every 20 minutes (1,200,000 ms)
+setInterval(() => {
+    intervalCount++;
+    if (intervalCount > 3) intervalCount = 1; // Resets cycle after 3rd interval
+
+    if (intervalCount === 1) {
+        forcedRoundsRemaining = 2;
+        targetMinMultiplier = 90.00;
+        console.log("⏰ [SIGNAL TRIGGERED] Interval 1: Next 2 rounds > 90x");
+    } else if (intervalCount === 2) {
+        forcedRoundsRemaining = 4;
+        targetMinMultiplier = 30.00;
+        console.log("⏰ [SIGNAL TRIGGERED] Interval 2: Next 4 rounds > 30x");
+    } else if (intervalCount === 3) {
+        forcedRoundsRemaining = 3;
+        targetMinMultiplier = 60.00;
+        console.log("⏰ [SIGNAL TRIGGERED] Interval 3: Next 3 rounds > 60x");
     }
-    
-    // Random instant crash
+}, 1200000);
+
+function determineCrashPoint() {
+    // 1. Check if a signal override sequence is active
+    if (forcedRoundsRemaining > 0) {
+        forcedRoundsRemaining--;
+        // Generates multiplier above target (adds random decimal bonus up to 15x)
+        let forcedCrash = targetMinMultiplier + (Math.random() * 15);
+        console.log(`[OVERRIDE ACTIVE] Forced Crash: ${forcedCrash.toFixed(2)}x | (${forcedRoundsRemaining} forced rounds left)`);
+        return parseFloat(forcedCrash.toFixed(2));
+    }
+
+    // 2. Normal Game Rounds (Flies standard odds)
     let randomNum = Math.random();
-    if (randomNum < 0.05) return 1.00;
+    if (randomNum < 0.05) return 1.00; // 5% instant crash chance
     
     return parseFloat((Math.random() * 3 + 1.05).toFixed(2));
 }
@@ -53,9 +78,8 @@ function runGameLoop() {
             clearInterval(gameInterval);
             gameState.isFlying = false;
             
-            // 2. UPDATE HISTORY ON CRASH
+            // Update odds history
             oddsHistory.push(gameState.crashPoint);
-            // Keep only the last 10 crash odds to avoid a massive array
             if (oddsHistory.length > 10) {
                 oddsHistory.shift(); 
             }
@@ -73,31 +97,31 @@ function runGameLoop() {
 
 runGameLoop();
 
-// 3. CREATE THE AUTOMATIC CHAT BOT
+// Automatic Chat Bot
 const botMessages = [
     "Alex: Just cashed out 500 KES! 💸",
     "Sarah: Waiting for 10x 🚀",
     "Kevo: Wow, crashed so fast 😭",
     "Mike: Let's goooo!",
     "Joy: Who is betting high this round?",
-    "Mwangi: Nice win right there." ,
-    "mwendee: what a day 🎉." ,
-    "walalka: waiting for the signals." ,
-    "katana: just received the withdrawal😜." ,
+    "Mwangi: Nice win right there.",
+    "Mwendee: what a day 🎉.",
+    "Walalka: waiting for the signals.",
+    "katana: just received the withdrawal 😜.",
+    "Seif: aisee, leo ni leo🔥." ,
+    "Dor: nani ywangojea signals? 😂." ,
+    "Kasim: cashed out 3500 😜." ,
 ];
 
-// Send a random bot message every 3 seconds
 setInterval(() => {
     const randomMsg = botMessages[Math.floor(Math.random() * botMessages.length)];
     io.emit("chat message", randomMsg);
 }, 3000); 
 
-
+// Socket Event Handlers
 io.on("connection", (socket) => {
     console.log(`Player connected: ${socket.id}`);
     
-    // 4. SEND FULL STATE + HISTORY TO NEW PLAYERS
-    // Now, anyone who connects/refreshes instantly gets the TRUE server history
     socket.emit("sync", {
         currentOdd: gameState.currentOdd,
         isFlying: gameState.isFlying,
@@ -109,6 +133,20 @@ io.on("connection", (socket) => {
         io.emit("chat message", data);
     });
 
+    // M-PESA WITHDRAWAL EVENT HANDLER
+    socket.on("requestWithdrawal", (data) => {
+        const { phone, amount } = data;
+        console.log(`[WITHDRAWAL REQUEST] Phone: ${phone} | Amount: KES ${amount}`);
+        
+        // Sends back transaction confirmation with Pending status
+        socket.emit("withdrawalStatus", {
+            phone: phone,
+            amount: amount,
+            status: "Pending",
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        });
+    });
+
     socket.on("disconnect", () => {
         console.log(`Player disconnected: ${socket.id}`);
     });
@@ -118,4 +156,3 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Aviator Game Server running on port ${PORT}`);
 });
-    
