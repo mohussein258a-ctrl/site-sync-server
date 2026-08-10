@@ -2,10 +2,92 @@ const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 
 const app = express();
 app.use(cors());
+app.use(express.json()); // Essential: Allows the server to read JSON data from the frontend
 
+// --- MONGODB CONNECTION ---
+// Uses your Render environment variable, but has a direct fallback just in case
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://Hamoody:HamoodY321@cluster0.coawz5g.mongodb.net/aviator?appName=Cluster0";
+
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log('✅ MongoDB Connected Successfully'))
+  .catch(err => console.error('❌ MongoDB Connection Error:', err));
+
+// --- USER DATABASE SCHEMA ---
+const userSchema = new mongoose.Schema({
+    phone: { type: String, required: true, unique: true },
+    password: { type: String, required: true },
+    userName: { type: String, required: true },
+    balance: { type: Number, default: 1000 } // Gives new users a starting balance of KES 1000
+});
+
+const User = mongoose.model('User', userSchema);
+
+// --- AUTHENTICATION & BALANCE API ROUTES ---
+
+// 1. Account Registration
+app.post('/api/register', async (req, res) => {
+    try {
+        const { phone, password, name } = req.body;
+        const existingUser = await User.findOne({ phone });
+        if (existingUser) {
+            return res.status(400).json({ message: "Phone number already registered." });
+        }
+
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const newUser = new User({ phone, password: hashedPassword, userName: name });
+        await newUser.save();
+
+        res.status(201).json({ 
+            success: true, 
+            user: { phone: newUser.phone, name: newUser.userName, balance: newUser.balance } 
+        });
+    } catch (err) {
+        res.status(500).json({ message: "Server error during registration." });
+    }
+});
+
+// 2. Account Login (Cross-Device)
+app.post('/api/login', async (req, res) => {
+    try {
+        const { phone, password } = req.body;
+        const user = await User.findOne({ phone });
+        if (!user) {
+            return res.status(400).json({ message: "Invalid phone number or password." });
+        }
+
+        const isMatch = await bcrypt.compare(password, user.password);
+        if (!isMatch) {
+            return res.status(400).json({ message: "Invalid phone number or password." });
+        }
+
+        res.json({ 
+            success: true, 
+            user: { phone: user.phone, name: user.userName, balance: user.balance } 
+        });
+    } catch (err) {
+        res.status(500).json({ message: "Server error during login." });
+    }
+});
+
+// 3. Update Balance (Saved permanently to cloud)
+app.post('/api/balance', async (req, res) => {
+    try {
+        const { phone, amount } = req.body;
+        const user = await User.findOneAndUpdate({ phone }, { balance: amount }, { new: true });
+        if (!user) return res.status(404).json({ message: "User not found" });
+
+        res.json({ success: true, balance: user.balance });
+    } catch (err) {
+        res.status(500).json({ message: "Error updating balance." });
+    }
+});
+
+// --- GAME SERVER & SOCKET ENGINE ---
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: {
@@ -162,4 +244,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Aviator Game Server running on port ${PORT}`);
 });
-        
+    
