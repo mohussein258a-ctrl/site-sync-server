@@ -1,5 +1,5 @@
 const express = require("express");
-const http = require("http");
+const http = http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 
@@ -58,11 +58,17 @@ function determineCrashPoint() {
         return parseFloat(forcedCrash.toFixed(2));
     }
 
-    // 2. Normal Game Rounds (Flies standard odds)
-    let randomNum = Math.random();
-    if (randomNum < 0.05) return 1.00; // 5% instant crash chance
+    // 2. Realistic Normal Game Rounds (Exponential Distribution)
+    if (Math.random() < 0.05) return 1.00; // 5% instant crash chance
     
-    return parseFloat((Math.random() * 3 + 1.05).toFixed(2));
+    let e = 0.01; 
+    let r = Math.random();
+    let crash = Math.max(1.00, (100 / (r * 100 + e)).toFixed(2));
+    
+    // Cap normal peaks so they don't spoil the signal intervals, with organic variance
+    if (crash > 15.00) crash = (Math.random() * 5 + 1.05).toFixed(2);
+
+    return parseFloat(crash);
 }
 
 function runGameLoop() {
@@ -110,7 +116,7 @@ const botMessages = [
     "katana: just received the withdrawal 😜.",
     "Seif: aisee, leo ni leo🔥." ,
     "Dor: nani ywangojea signals? 😂." ,
-    "Kasim: cashed out 3500 😜." ,
+    "Kasim: cashed out 3500 😜.",
 ];
 
 setInterval(() => {
@@ -156,3 +162,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Aviator Game Server running on port ${PORT}`);
 });
+        
