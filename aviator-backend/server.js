@@ -11,7 +11,7 @@ app.use(express.json()); // Essential: Allows the server to read JSON data from 
 
 // --- MONGODB CONNECTION ---
 // Uses your Render environment variable, but has a direct fallback just in case
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://Hamoody:hamoodY321@cluster0.coawz5g.mongodb.net/aviator?appName=Cluster0";
+const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://Hamoody:HamoodY321cluster0.coawz5g.mongodb.net/aviator?appName=Cluster0";
 
 mongoose.connect(MONGODB_URI)
   .then(() => console.log('✅ MongoDB Connected Successfully'))
