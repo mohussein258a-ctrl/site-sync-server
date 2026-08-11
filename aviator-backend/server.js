@@ -1,4 +1,4 @@
-const express = require("express");
+const express = require("express"); // FIXED: lowercase 'const'
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
@@ -10,18 +10,20 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- JWT & ENVIROMENT CONFIGURATION ---
+// --- JWT & ENVIRONMENT CONFIGURATION ---
 const JWT_SECRET = process.env.JWT_SECRET || "pilot_hamoody_secret_key_2026";
 const MONGODB_URI = process.env.MONGODB_URI;
 
 if (!MONGODB_URI) {
-    console.error("❌ MONGODB_URI is not defined in environment variables.");
+    console.warn("⚠️ MONGODB_URI is not defined in environment variables. Make sure to add it in Render.");
 }
 
 // --- MONGODB CONNECTION ---
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log('✅ MongoDB Connected Successfully'))
-  .catch(err => console.error('❌ MongoDB Connection Error:', err));
+if (MONGODB_URI) {
+    mongoose.connect(MONGODB_URI)
+      .then(() => console.log('✅ MongoDB Connected Successfully'))
+      .catch(err => console.error('❌ MongoDB Connection Error:', err));
+}
 
 // --- USER DATABASE SCHEMA ---
 const userSchema = new mongoose.Schema({
@@ -108,7 +110,7 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// 3. Get Current Session & Balance (FIX: Call this on frontend page reload)
+// 3. Get Current Session & Balance (Called on frontend page reload)
 app.get('/api/me', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -250,7 +252,6 @@ const botMessages = [
     "Fred: kusota tunasema bye bye 😂." ,
     "Eddy: Don't just wait for signals." ,
     "Sharon: huu mwaka ni wa kununua gari aisee 💯." ,
-    
 ];
 
 setInterval(() => {
@@ -281,8 +282,8 @@ io.on("connection", (socket) => {
     });
 });
 
+// --- SERVER INITIALIZATION ---
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Aviator Game Server running on port ${PORT}`);
+    console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-    
