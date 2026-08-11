@@ -10,8 +10,6 @@ app.use(cors());
 app.use(express.json());
 
 // --- MONGODB CONNECTION ---
-// SECURITY FIX: Strictly using the environment variable. 
-// Set MONGODB_URI in your Render dashboard environment variables.
 const MONGODB_URI = process.env.MONGODB_URI;
 
 if (!MONGODB_URI) {
@@ -27,7 +25,7 @@ const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true },
     userName: { type: String, required: true },
-    balance: { type: Number, default: 1000 }
+    balance: { type: Number, default: 0 } // FIXED: Reset default balance from 1000 to 0 KES
 });
 
 const User = mongoose.model('User', userSchema);
@@ -37,7 +35,6 @@ const User = mongoose.model('User', userSchema);
 // 1. Account Registration
 app.post('/api/register', async (req, res) => {
     try {
-        // NOTE: Your frontend HTML MUST send a JSON object with { phone, password, name }
         const { phone, password, name } = req.body;
         
         if (!phone || !password || !name) {
@@ -59,7 +56,6 @@ app.post('/api/register', async (req, res) => {
         });
     } catch (err) {
         console.error("Registration Error:", err);
-        // Returns the actual error message to the frontend for easier debugging
         res.status(500).json({ message: "Server error during registration.", error: err.message });
     }
 });
@@ -239,4 +235,4 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Aviator Game Server running on port ${PORT}`);
-});
+});                  
