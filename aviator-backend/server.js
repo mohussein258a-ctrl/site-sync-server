@@ -257,7 +257,7 @@ const botMessages = [
 setInterval(() => {
     const randomMsg = botMessages[Math.floor(Math.random() * botMessages.length)];
     io.emit("chat message", randomMsg);
-}, 3000); 
+}, 5000); 
 
 // Socket Event Handlers
 io.on("connection", (socket) => {
