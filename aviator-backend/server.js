@@ -7,11 +7,16 @@ const bcrypt = require("bcryptjs");
 
 const app = express();
 app.use(cors());
-app.use(express.json()); // Essential: Allows the server to read JSON data from the frontend
+app.use(express.json());
 
 // --- MONGODB CONNECTION ---
-// Uses your Render environment variable, but has a direct fallback just in case
-const MONGODB_URI = process.env.MONGODB_URI || "mongodb+srv://Hamoody:HamoodY321@cluster0.coawz5g.mongodb.net/aviator?appName=Cluster0";
+// SECURITY FIX: Strictly using the environment variable. 
+// Set MONGODB_URI in your Render dashboard environment variables.
+const MONGODB_URI = process.env.MONGODB_URI;
+
+if (!MONGODB_URI) {
+    console.error("❌ MONGODB_URI is not defined in environment variables.");
+}
 
 mongoose.connect(MONGODB_URI)
   .then(() => console.log('✅ MongoDB Connected Successfully'))
@@ -22,7 +27,7 @@ const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true },
     userName: { type: String, required: true },
-    balance: { type: Number, default: 1000 } // Gives new users a starting balance of KES 1000
+    balance: { type: Number, default: 1000 }
 });
 
 const User = mongoose.model('User', userSchema);
@@ -32,7 +37,13 @@ const User = mongoose.model('User', userSchema);
 // 1. Account Registration
 app.post('/api/register', async (req, res) => {
     try {
+        // NOTE: Your frontend HTML MUST send a JSON object with { phone, password, name }
         const { phone, password, name } = req.body;
+        
+        if (!phone || !password || !name) {
+            return res.status(400).json({ message: "Missing required fields: phone, password, or name." });
+        }
+
         const existingUser = await User.findOne({ phone });
         if (existingUser) {
             return res.status(400).json({ message: "Phone number already registered." });
@@ -47,14 +58,21 @@ app.post('/api/register', async (req, res) => {
             user: { phone: newUser.phone, name: newUser.userName, balance: newUser.balance } 
         });
     } catch (err) {
-        res.status(500).json({ message: "Server error during registration." });
+        console.error("Registration Error:", err);
+        // Returns the actual error message to the frontend for easier debugging
+        res.status(500).json({ message: "Server error during registration.", error: err.message });
     }
 });
 
-// 2. Account Login (Cross-Device)
+// 2. Account Login
 app.post('/api/login', async (req, res) => {
     try {
         const { phone, password } = req.body;
+        
+        if (!phone || !password) {
+            return res.status(400).json({ message: "Phone and password are required." });
+        }
+
         const user = await User.findOne({ phone });
         if (!user) {
             return res.status(400).json({ message: "Invalid phone number or password." });
@@ -70,11 +88,12 @@ app.post('/api/login', async (req, res) => {
             user: { phone: user.phone, name: user.userName, balance: user.balance } 
         });
     } catch (err) {
+        console.error("Login Error:", err);
         res.status(500).json({ message: "Server error during login." });
     }
 });
 
-// 3. Update Balance (Saved permanently to cloud)
+// 3. Update Balance
 app.post('/api/balance', async (req, res) => {
     try {
         const { phone, amount } = req.body;
@@ -102,18 +121,15 @@ let gameState = {
     isFlying: false
 };
 
-// Seeded history array
 let oddsHistory = [1.06, 2.19, 5.51, 1.45, 3.20]; 
 
-// --- 20-MINUTE SIGNAL OVERRIDE ENGINE ---
 let intervalCount = 0;
 let forcedRoundsRemaining = 0;
 let targetMinMultiplier = 1.00;
 
-// Timer runs every 20 minutes (1,200,000 ms)
 setInterval(() => {
     intervalCount++;
-    if (intervalCount > 3) intervalCount = 1; // Resets cycle after 3rd interval
+    if (intervalCount > 3) intervalCount = 1; 
 
     if (intervalCount === 1) {
         forcedRoundsRemaining = 2;
@@ -131,23 +147,18 @@ setInterval(() => {
 }, 1200000);
 
 function determineCrashPoint() {
-    // 1. Check if a signal override sequence is active
     if (forcedRoundsRemaining > 0) {
         forcedRoundsRemaining--;
-        // Generates multiplier above target (adds random decimal bonus up to 15x)
         let forcedCrash = targetMinMultiplier + (Math.random() * 15);
-        console.log(`[OVERRIDE ACTIVE] Forced Crash: ${forcedCrash.toFixed(2)}x | (${forcedRoundsRemaining} forced rounds left)`);
         return parseFloat(forcedCrash.toFixed(2));
     }
 
-    // 2. Realistic Normal Game Rounds (Exponential Distribution)
-    if (Math.random() < 0.05) return 1.00; // 5% instant crash chance
+    if (Math.random() < 0.05) return 1.00; 
     
     let e = 0.01; 
     let r = Math.random();
     let crash = Math.max(1.00, (100 / (r * 100 + e)).toFixed(2));
     
-    // Cap normal peaks so they don't spoil the signal intervals, with organic variance
     if (crash > 15.00) crash = (Math.random() * 5 + 1.05).toFixed(2);
 
     return parseFloat(crash);
@@ -159,23 +170,19 @@ function runGameLoop() {
     gameState.isFlying = true;
 
     io.emit("takeoff");
-    console.log(`[Game Started] Target Crash Point: ${gameState.crashPoint}x`);
 
     const gameInterval = setInterval(() => {
         if (gameState.currentOdd >= gameState.crashPoint) {
             clearInterval(gameInterval);
             gameState.isFlying = false;
             
-            // Update odds history
             oddsHistory.push(gameState.crashPoint);
             if (oddsHistory.length > 10) {
                 oddsHistory.shift(); 
             }
 
             io.emit("crash", { finalOdd: gameState.crashPoint });
-            console.log(`[Crashed] At ${gameState.crashPoint}x`);
-
-            setTimeout(runGameLoop, 5000); // Wait 5 seconds before next round
+            setTimeout(runGameLoop, 5000); 
         } else {
             gameState.currentOdd = parseFloat((gameState.currentOdd + 0.03).toFixed(2));
             io.emit("tick", { currentOdd: gameState.currentOdd });
@@ -208,8 +215,6 @@ setInterval(() => {
 
 // Socket Event Handlers
 io.on("connection", (socket) => {
-    console.log(`Player connected: ${socket.id}`);
-    
     socket.emit("sync", {
         currentOdd: gameState.currentOdd,
         isFlying: gameState.isFlying,
@@ -217,16 +222,11 @@ io.on("connection", (socket) => {
     });
 
     socket.on("chat message", (data) => {
-        console.log(`Chat message: ${data}`);
         io.emit("chat message", data);
     });
 
-    // M-PESA WITHDRAWAL EVENT HANDLER
     socket.on("requestWithdrawal", (data) => {
         const { phone, amount } = data;
-        console.log(`[WITHDRAWAL REQUEST] Phone: ${phone} | Amount: KES ${amount}`);
-        
-        // Sends back transaction confirmation with Pending status
         socket.emit("withdrawalStatus", {
             phone: phone,
             amount: amount,
@@ -234,14 +234,9 @@ io.on("connection", (socket) => {
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         });
     });
-
-    socket.on("disconnect", () => {
-        console.log(`Player disconnected: ${socket.id}`);
-    });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Aviator Game Server running on port ${PORT}`);
 });
-    
