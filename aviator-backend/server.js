@@ -4,18 +4,21 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- MONGODB CONNECTION ---
+// --- JWT & ENVIROMENT CONFIGURATION ---
+const JWT_SECRET = process.env.JWT_SECRET || "pilot_hamoody_secret_key_2026";
 const MONGODB_URI = process.env.MONGODB_URI;
 
 if (!MONGODB_URI) {
     console.error("❌ MONGODB_URI is not defined in environment variables.");
 }
 
+// --- MONGODB CONNECTION ---
 mongoose.connect(MONGODB_URI)
   .then(() => console.log('✅ MongoDB Connected Successfully'))
   .catch(err => console.error('❌ MongoDB Connection Error:', err));
@@ -25,7 +28,7 @@ const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true },
     userName: { type: String, required: true },
-    balance: { type: Number, default: 0 } // FIXED: Reset default balance from 1000 to 0 KES
+    balance: { type: Number, default: 0 }
 });
 
 const User = mongoose.model('User', userSchema);
@@ -50,8 +53,16 @@ app.post('/api/register', async (req, res) => {
         const newUser = new User({ phone, password: hashedPassword, userName: name });
         await newUser.save();
 
+        // Generate Session Token
+        const token = jwt.sign(
+            { userId: newUser._id, phone: newUser.phone }, 
+            JWT_SECRET, 
+            { expiresIn: '7d' }
+        );
+
         res.status(201).json({ 
             success: true, 
+            token: token,
             user: { phone: newUser.phone, name: newUser.userName, balance: newUser.balance } 
         });
     } catch (err) {
@@ -79,8 +90,16 @@ app.post('/api/login', async (req, res) => {
             return res.status(400).json({ message: "Invalid phone number or password." });
         }
 
+        // Generate Session Token
+        const token = jwt.sign(
+            { userId: user._id, phone: user.phone }, 
+            JWT_SECRET, 
+            { expiresIn: '7d' }
+        );
+
         res.json({ 
             success: true, 
+            token: token,
             user: { phone: user.phone, name: user.userName, balance: user.balance } 
         });
     } catch (err) {
@@ -89,7 +108,32 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// 3. Update Balance
+// 3. Get Current Session & Balance (FIX: Call this on frontend page reload)
+app.get('/api/me', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ message: "Unauthorized: No token provided." });
+        }
+
+        const token = authHeader.split(" ")[1];
+        const decoded = jwt.verify(token, JWT_SECRET);
+
+        const user = await User.findById(decoded.userId);
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        res.json({
+            success: true,
+            user: { phone: user.phone, name: user.userName, balance: user.balance }
+        });
+    } catch (err) {
+        res.status(401).json({ message: "Invalid or expired token." });
+    }
+});
+
+// 4. Update Balance
 app.post('/api/balance', async (req, res) => {
     try {
         const { phone, amount } = req.body;
@@ -202,6 +246,11 @@ const botMessages = [
     "Seif: aisee, leo ni leo🔥." ,
     "Dor: nani ywangojea signals? 😂." ,
     "Kasim: cashed out 3500 😜.",
+    "John: watu watengeze doo." ,
+    "Fred: kusota tunasema bye bye 😂." ,
+    "Eddy: Don't just wait for signals." ,
+    "Sharon: huu mwaka ni wa kununua gari aisee 💯." ,
+    
 ];
 
 setInterval(() => {
@@ -235,4 +284,5 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`Aviator Game Server running on port ${PORT}`);
-});                  
+});
+    
