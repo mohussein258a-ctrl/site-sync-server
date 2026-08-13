@@ -40,7 +40,7 @@ const withdrawalSchema = new mongoose.Schema({
     userPhone: { type: String, required: true },
     phone: { type: String, required: true },
     amount: { type: Number, required: true },
-    status: { type: String, default: "Processing..." },
+    status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
 });
 
@@ -178,9 +178,18 @@ app.get('/api/withdrawals', async (req, res) => {
         // Fetch all withdrawals belonging to this user
         const withdrawals = await Withdrawal.find({ userPhone: user.phone }).sort({ createdAt: -1 });
 
+        // Map data so the frontend receives the formatted "timestamp" string it expects
+        const formattedWithdrawals = withdrawals.map(w => ({
+            _id: w._id,
+            phone: w.phone,
+            amount: w.amount,
+            status: w.status,
+            timestamp: new Date(w.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
+        }));
+
         res.json({
             success: true,
-            withdrawals: withdrawals
+            withdrawals: formattedWithdrawals
         });
     } catch (err) {
         console.error("Error fetching withdrawals:", err);
@@ -314,41 +323,35 @@ io.on("connection", (socket) => {
     // --- WITHDRAWAL HANDLER WITH MONGODB PERSISTENCE ---
     socket.on("requestWithdrawal", async (data) => {
         try {
-            const { phone, amount, userPhone } = data;
-            const accountPhone = userPhone || phone; // Account owner's phone
+            // Frontend passes token, phone, and amount
+            const { token, phone, amount } = data;
+            
+            if (!token) return;
 
-            // 1. Create and save new withdrawal document in MongoDB
+            // 1. Decode token to securely get the user's account phone number
+            const decoded = jwt.verify(token, JWT_SECRET);
+            const userPhone = decoded.phone;
+
+            // 2. Create and save new withdrawal document in MongoDB
             const withdrawal = new Withdrawal({
-                userPhone: accountPhone,
+                userPhone: userPhone,
                 phone: phone,
                 amount: amount,
-                status: "Processing..."
+                status: "Pending"
             });
             await withdrawal.save();
 
-            // 2. Send immediate socket response with generated DB ID
+            const formattedTime = new Date(withdrawal.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+
+            // 3. Send immediate socket response with generated DB ID so frontend can render it
             socket.emit("withdrawalStatus", {
                 id: withdrawal._id.toString(),
                 phone: withdrawal.phone,
                 amount: withdrawal.amount,
                 status: withdrawal.status,
-                timestamp: new Date(withdrawal.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                timestamp: formattedTime
             });
 
-            // 3. Update status to "Pending" after 3 seconds in MongoDB
-            setTimeout(async () => {
-                try {
-                    withdrawal.status = "Pending";
-                    await withdrawal.save();
-
-                    socket.emit("withdrawalUpdate", {
-                        id: withdrawal._id.toString(),
-                        status: "Pending"
-                    });
-                } catch (updateErr) {
-                    console.error("Error updating withdrawal in DB:", updateErr);
-                }
-            }, 3000);
         } catch (err) {
             console.error("Error saving withdrawal to MongoDB:", err);
         }
@@ -360,4 +363,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-         
+                
