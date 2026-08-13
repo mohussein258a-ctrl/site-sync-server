@@ -1,4 +1,4 @@
-const express = require("express"); // FIXED: lowercase 'const'
+const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
@@ -34,6 +34,17 @@ const userSchema = new mongoose.Schema({
 });
 
 const User = mongoose.model('User', userSchema);
+
+// --- WITHDRAWAL DATABASE SCHEMA ---
+const withdrawalSchema = new mongoose.Schema({
+    userPhone: { type: String, required: true },
+    phone: { type: String, required: true },
+    amount: { type: Number, required: true },
+    status: { type: String, default: "Processing..." },
+    createdAt: { type: Date, default: Date.now }
+});
+
+const Withdrawal = mongoose.model('Withdrawal', withdrawalSchema);
 
 // --- AUTHENTICATION & BALANCE API ROUTES ---
 
@@ -145,6 +156,35 @@ app.post('/api/balance', async (req, res) => {
         res.json({ success: true, balance: user.balance });
     } catch (err) {
         res.status(500).json({ message: "Error updating balance." });
+    }
+});
+
+// 5. Get Withdrawal History (Fetch persisted records on page refresh)
+app.get('/api/withdrawals', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ message: "Unauthorized: No token provided." });
+        }
+
+        const token = authHeader.split(" ")[1];
+        const decoded = jwt.verify(token, JWT_SECRET);
+
+        const user = await User.findById(decoded.userId);
+        if (!user) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        // Fetch all withdrawals belonging to this user
+        const withdrawals = await Withdrawal.find({ userPhone: user.phone }).sort({ createdAt: -1 });
+
+        res.json({
+            success: true,
+            withdrawals: withdrawals
+        });
+    } catch (err) {
+        console.error("Error fetching withdrawals:", err);
+        res.status(500).json({ message: "Error fetching withdrawal history." });
     }
 });
 
@@ -271,27 +311,47 @@ io.on("connection", (socket) => {
         io.emit("chat message", data);
     });
 
-    // --- WITHDRAWAL HANDLER WITH DYNAMIC STATUS ---
-    socket.on("requestWithdrawal", (data) => {
-        const { phone, amount } = data;
-        const txId = "TX_" + Date.now(); // Unique Transaction ID
+    // --- WITHDRAWAL HANDLER WITH MONGODB PERSISTENCE ---
+    socket.on("requestWithdrawal", async (data) => {
+        try {
+            const { phone, amount, userPhone } = data;
+            const accountPhone = userPhone || phone; // Account owner's phone
 
-        // 1. Immediately emit "Processing..." status
-        socket.emit("withdrawalStatus", {
-            id: txId,
-            phone: phone,
-            amount: amount,
-            status: "Processing...",
-            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-        });
-
-        // 2. Transition to "Pending" status after 3 seconds
-        setTimeout(() => {
-            socket.emit("withdrawalUpdate", {
-                id: txId,
-                status: "Pending"
+            // 1. Create and save new withdrawal document in MongoDB
+            const withdrawal = new Withdrawal({
+                userPhone: accountPhone,
+                phone: phone,
+                amount: amount,
+                status: "Processing..."
             });
-        }, 5000);
+            await withdrawal.save();
+
+            // 2. Send immediate socket response with generated DB ID
+            socket.emit("withdrawalStatus", {
+                id: withdrawal._id.toString(),
+                phone: withdrawal.phone,
+                amount: withdrawal.amount,
+                status: withdrawal.status,
+                timestamp: new Date(withdrawal.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            });
+
+            // 3. Update status to "Pending" after 3 seconds in MongoDB
+            setTimeout(async () => {
+                try {
+                    withdrawal.status = "Pending";
+                    await withdrawal.save();
+
+                    socket.emit("withdrawalUpdate", {
+                        id: withdrawal._id.toString(),
+                        status: "Pending"
+                    });
+                } catch (updateErr) {
+                    console.error("Error updating withdrawal in DB:", updateErr);
+                }
+            }, 3000);
+        } catch (err) {
+            console.error("Error saving withdrawal to MongoDB:", err);
+        }
     });
 });
 
@@ -300,4 +360,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-        
+         
