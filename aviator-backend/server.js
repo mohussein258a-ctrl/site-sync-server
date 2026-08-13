@@ -349,7 +349,7 @@ io.on("connection", (socket) => {
                 phone: withdrawal.phone,
                 amount: withdrawal.amount,
                 status: withdrawal.status,
-                timestamp: formattedTime
+                timestamp: 
             });
 
         } catch (err) {
