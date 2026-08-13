@@ -245,13 +245,13 @@ const botMessages = [
     "Mwendee: what a day 🎉.",
     "Walalka: waiting for the signals.",
     "katana: just received the withdrawal 😜.",
-    "Seif: aisee, leo ni leo🔥." ,
-    "Dor: nani ywangojea signals? 😂." ,
+    "Seif: aisee, leo ni leo🔥.",
+    "Dor: nani ywangojea signals? 😂.",
     "Kasim: cashed out 3500 😜.",
-    "John: watu watengeze doo." ,
-    "Fred: kusota tunasema bye bye 😂." ,
-    "Eddy: Don't just wait for signals." ,
-    "Sharon: huu mwaka ni wa kununua gari aisee 💯." ,
+    "John: watu watengeze doo.",
+    "Fred: kusota tunasema bye bye 😂.",
+    "Eddy: Don't just wait for signals.",
+    "Sharon: huu mwaka ni wa kununua gari aisee 💯.",
 ];
 
 setInterval(() => {
@@ -271,14 +271,27 @@ io.on("connection", (socket) => {
         io.emit("chat message", data);
     });
 
+    // --- WITHDRAWAL HANDLER WITH DYNAMIC STATUS ---
     socket.on("requestWithdrawal", (data) => {
         const { phone, amount } = data;
+        const txId = "TX_" + Date.now(); // Unique Transaction ID
+
+        // 1. Immediately emit "Processing..." status
         socket.emit("withdrawalStatus", {
+            id: txId,
             phone: phone,
             amount: amount,
-            status: "Pending",
+            status: "Processing...",
             timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
         });
+
+        // 2. Transition to "Pending" status after 3 seconds
+        setTimeout(() => {
+            socket.emit("withdrawalUpdate", {
+                id: txId,
+                status: "Pending"
+            });
+        }, 5000);
     });
 });
 
@@ -287,3 +300,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
+        
