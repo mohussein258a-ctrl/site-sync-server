@@ -238,21 +238,33 @@ setInterval(() => {
 }, 1200000);
 
 function determineCrashPoint() {
+    // 1. Keep your scheduled "Signal" rounds intact if you still want them
     if (forcedRoundsRemaining > 0) {
         forcedRoundsRemaining--;
-        let forcedCrash = targetMinMultiplier + (Math.random() * 15);
+        // Cap forced signal rounds at 20x as well, or let them use your target
+        let forcedCrash = Math.min(20.00, targetMinMultiplier + (Math.random() * 5));
         return parseFloat(forcedCrash.toFixed(2));
     }
 
-    if (Math.random() < 0.05) return 1.00; 
-    
-    let e = 0.01; 
-    let r = Math.random();
-    let crash = Math.max(1.00, (100 / (r * 100 + e)).toFixed(2));
-    
-    if (crash > 15.00) crash = (Math.random() * 5 + 1.05).toFixed(2);
+    // 2. House Edge: 4% chance of instant crash at 1.00x
+    if (Math.random() < 0.04) {
+        return 1.00;
+    }
 
-    return parseFloat(crash);
+    // 3. Unpredictable Distribution capped strictly at a maximum of 20.00x
+    // Using a random roll that maps smoothly up to 20x
+    const r = Math.random();
+    
+    // This formula creates an exponential distribution curve favoring lower multipliers
+    // while allowing unpredictable higher outcomes up to the 20x limit.
+    let crash = 1.01 + (r * r * 19.00); 
+
+    // Hard cap guarantee at 20.00x
+    if (crash > 20.00) {
+        crash = 20.00;
+    }
+
+    return parseFloat(crash.toFixed(2));
 }
 
 function runGameLoop() {
