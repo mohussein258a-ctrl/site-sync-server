@@ -247,7 +247,7 @@ function determineCrashPoint() {
     }
 
     // 2. House Edge: 4% chance of instant crash at 1.00x
-    if (Math.random() < 0.09) {
+    if (Math.random() < 0.05) {
         return 1.00;
     }
 
@@ -257,7 +257,7 @@ function determineCrashPoint() {
     
     // This formula creates an exponential distribution curve favoring lower multipliers
     // while allowing unpredictable higher outcomes up to the 20x limit.
-    let crash = 1.01 + (r * r * 5.00); 
+    let crash = 1.01 + (r * r * 10.00); 
 
     // Hard cap guarantee at 20.00x
     if (crash > 20.00) {
