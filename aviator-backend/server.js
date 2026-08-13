@@ -256,7 +256,7 @@ function determineCrashPoint() {
     
     // This formula creates an exponential distribution curve favoring lower multipliers
     // while allowing unpredictable higher outcomes up to the 20x limit.
-    let crash = 1.01 + (r * r * 10.00); 
+    let crash = 1.01 + (r * r * 9.00); 
 
     // Hard cap guarantee at 20.00x
     if (crash > 20.00) {
