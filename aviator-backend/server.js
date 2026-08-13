@@ -184,7 +184,6 @@ app.get('/api/withdrawals', async (req, res) => {
             phone: w.phone,
             amount: w.amount,
             status: w.status,
-            timestamp: new Date(w.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
         }));
 
         res.json({
