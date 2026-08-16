@@ -170,7 +170,6 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
 
         const formattedPhone = formatPhoneNumber(rawPhone);
 
-        // Send required ModePay API headers
         const response = await fetch("https://modepay.live/api/v1/stkpush", {
             method: "POST",
             headers: {
@@ -187,11 +186,16 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         });
 
         const data = await response.json();
+        
+        // Log ModePay's exact response in Render Logs
+        console.log("ModePay Response Status:", response.status, JSON.stringify(data));
 
         if (response.ok && (data.success || data.status === "success" || data.ResponseCode === "0")) {
             return res.json({ success: true, message: "M-Pesa STK Push sent to your phone! Enter your PIN." });
         } else {
-            return res.status(400).json({ message: data.message || "Failed to trigger M-Pesa prompt. Try again." });
+            // Extract exact error message returned by ModePay
+            const errMsg = data.message || data.error || data.ResponseDescription || data.msg || "ModePay API request rejected.";
+            return res.status(400).json({ message: errMsg });
         }
     } catch (err) {
         console.error("ModePay STK Push Error:", err);
@@ -362,4 +366,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-    
+            
