@@ -17,11 +17,17 @@ app.use(express.json());
 // --- ENVIRONMENT CONFIGURATION ---
 const JWT_SECRET = process.env.JWT_SECRET || "pilot_hamoody_secret_key_2026";
 const MONGODB_URI = process.env.MONGODB_URI;
-const MODEPAY_API_KEY = process.env.MODEPAY_API_KEY;
-const MODEPAY_SECRET_KEY = process.env.MODEPAY_SECRET_KEY;
+
+// Automatically trim spaces, quotes, or trailing characters from keys
+const MODEPAY_API_KEY = (process.env.MODEPAY_API_KEY || "").replace(/['"]/g, "").trim();
+const MODEPAY_SECRET_KEY = (process.env.MODEPAY_SECRET_KEY || "").replace(/['"]/g, "").trim();
 
 if (!MONGODB_URI) {
     console.warn("⚠️ MONGODB_URI is not defined in Render environment variables.");
+}
+
+if (!MODEPAY_API_KEY || !MODEPAY_SECRET_KEY) {
+    console.warn("⚠️ ModePay API keys are missing or invalid in Render environment variables.");
 }
 
 // --- MONGODB CONNECTION ---
@@ -187,13 +193,11 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
 
         const data = await response.json();
         
-        // Log ModePay's exact response in Render Logs
         console.log("ModePay Response Status:", response.status, JSON.stringify(data));
 
         if (response.ok && (data.success || data.status === "success" || data.ResponseCode === "0")) {
             return res.json({ success: true, message: "M-Pesa STK Push sent to your phone! Enter your PIN." });
         } else {
-            // Extract exact error message returned by ModePay
             const errMsg = data.message || data.error || data.ResponseDescription || data.msg || "ModePay API request rejected.";
             return res.status(400).json({ message: errMsg });
         }
@@ -366,4 +370,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-            
+                
