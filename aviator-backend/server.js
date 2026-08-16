@@ -25,17 +25,18 @@ if (MONGODB_URI) {
       .catch(err => console.error('❌ MongoDB Connection Error:', err));
 }
 
-// --- USER DATABASE SCHEMA ---
+// --- DATABASE SCHEMAS ---
+
+// 1. User Schema
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true },
     userName: { type: String, required: true },
     balance: { type: Number, default: 0 }
 });
-
 const User = mongoose.model('User', userSchema);
 
-// --- WITHDRAWAL DATABASE SCHEMA ---
+// 2. Withdrawal Schema
 const withdrawalSchema = new mongoose.Schema({
     userPhone: { type: String, required: true },
     phone: { type: String, required: true },
@@ -43,8 +44,19 @@ const withdrawalSchema = new mongoose.Schema({
     status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
 });
-
 const Withdrawal = mongoose.model('Withdrawal', withdrawalSchema);
+
+// 3. Deposit Schema (Modepay M-Pesa)
+const depositSchema = new mongoose.Schema({
+    userPhone: { type: String, required: true },
+    mpesaPhone: { type: String, required: true },
+    amount: { type: Number, required: true },
+    checkoutRequestId: { type: String, required: true }, 
+    status: { type: String, default: "Pending" }, 
+    createdAt: { type: Date, default: Date.now }
+});
+const Deposit = mongoose.model('Deposit', depositSchema);
+
 
 // --- AUTHENTICATION & BALANCE API ROUTES ---
 
@@ -66,7 +78,6 @@ app.post('/api/register', async (req, res) => {
         const newUser = new User({ phone, password: hashedPassword, userName: name });
         await newUser.save();
 
-        // Generate Session Token
         const token = jwt.sign(
             { userId: newUser._id, phone: newUser.phone }, 
             JWT_SECRET, 
@@ -103,7 +114,6 @@ app.post('/api/login', async (req, res) => {
             return res.status(400).json({ message: "Invalid phone number or password." });
         }
 
-        // Generate Session Token
         const token = jwt.sign(
             { userId: user._id, phone: user.phone }, 
             JWT_SECRET, 
@@ -121,7 +131,7 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// 3. Get Current Session & Balance (Called on frontend page reload)
+// 3. Get Current Session & Balance
 app.get('/api/me', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -146,7 +156,7 @@ app.get('/api/me', async (req, res) => {
     }
 });
 
-// 4. Update Balance
+// 4. Update Balance (Manual/Internal)
 app.post('/api/balance', async (req, res) => {
     try {
         const { phone, amount } = req.body;
@@ -159,7 +169,7 @@ app.post('/api/balance', async (req, res) => {
     }
 });
 
-// 5. Get Withdrawal History (Fetch persisted records on page refresh)
+// 5. Get Withdrawal History
 app.get('/api/withdrawals', async (req, res) => {
     try {
         const authHeader = req.headers.authorization;
@@ -175,10 +185,8 @@ app.get('/api/withdrawals', async (req, res) => {
             return res.status(404).json({ message: "User not found." });
         }
 
-        // Fetch all withdrawals belonging to this user
         const withdrawals = await Withdrawal.find({ userPhone: user.phone }).sort({ createdAt: -1 });
 
-        // Map data so the frontend receives the formatted "timestamp" string it expects
         const formattedWithdrawals = withdrawals.map(w => ({
             _id: w._id,
             phone: w.phone,
@@ -196,6 +204,129 @@ app.get('/api/withdrawals', async (req, res) => {
         res.status(500).json({ message: "Error fetching withdrawal history." });
     }
 });
+
+
+// --- MODEPAY DEPOSIT M-PESA INTEGRATION ---
+
+const MODEPAY_API_KEY = process.env.MODEPAY_API_KEY || "YOUR_MODEPAY_API_KEY";
+const MODEPAY_STK_URL = "https://api.modepay.com/v1/checkout/stk"; 
+const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://your-production-url.onrender.com/api/deposit/webhook"; 
+
+// 6. Initiate M-Pesa STK Push
+app.post('/api/deposit/prompt', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ message: "Unauthorized." });
+        }
+
+        const token = authHeader.split(" ")[1];
+        const decoded = jwt.verify(token, JWT_SECRET);
+        
+        const { mpesaPhone, amount } = req.body;
+
+        if (amount < 500) {
+            return res.status(400).json({ message: "Minimum deposit is 500 KES." });
+        }
+
+        let formattedPhone = mpesaPhone.startsWith("0") ? "254" + mpesaPhone.substring(1) : mpesaPhone;
+
+        const response = await fetch(MODEPAY_STK_URL, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${MODEPAY_API_KEY}`
+            },
+            body: JSON.stringify({
+                phoneNumber: formattedPhone,
+                amount: amount,
+                callbackUrl: WEBHOOK_URL,
+                reference: `DEP_${Date.now()}`,
+                description: "Wallet Deposit"
+            })
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.checkoutRequestId) {
+            const newDeposit = new Deposit({
+                userPhone: decoded.phone,
+                mpesaPhone: formattedPhone,
+                amount: amount,
+                checkoutRequestId: data.checkoutRequestId,
+                status: "Pending"
+            });
+            await newDeposit.save();
+
+            res.json({ success: true, message: "Prompt sent! Check your phone to enter PIN." });
+        } else {
+            res.status(400).json({ message: "Failed to initiate M-Pesa prompt.", error: data });
+        }
+    } catch (err) {
+        console.error("Deposit Prompt Error:", err);
+        res.status(500).json({ message: "Server error initiating deposit." });
+    }
+});
+
+// 7. Modepay Webhook (Listens for successful payment from M-Pesa)
+app.post('/api/deposit/webhook', async (req, res) => {
+    try {
+        const { checkoutRequestId, status, amount } = req.body; 
+
+        // Always acknowledge receipt of webhook immediately to prevent Modepay retries
+        res.status(200).send("Webhook received");
+
+        const deposit = await Deposit.findOne({ checkoutRequestId });
+        if (!deposit || deposit.status === "Completed") return;
+
+        if (status === "SUCCESS") {
+            deposit.status = "Completed";
+            await deposit.save();
+
+            const user = await User.findOne({ phone: deposit.userPhone });
+            if (user) {
+                user.balance += Number(amount);
+                await user.save();
+                
+                // Emit socket event to update balance in real-time on frontend
+                io.emit("balanceUpdated", { phone: user.phone, balance: user.balance });
+            }
+        } else {
+            deposit.status = "Failed";
+            await deposit.save();
+        }
+    } catch (err) {
+        console.error("Webhook Error:", err);
+    }
+});
+
+// 8. Get Deposit History
+app.get('/api/deposits', async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ message: "Unauthorized." });
+        }
+        const token = authHeader.split(" ")[1];
+        const decoded = jwt.verify(token, JWT_SECRET);
+
+        const deposits = await Deposit.find({ userPhone: decoded.phone }).sort({ createdAt: -1 });
+        
+        // Format for frontend
+        const formattedDeposits = deposits.map(d => ({
+            _id: d._id,
+            mpesaPhone: d.mpesaPhone,
+            amount: d.amount,
+            status: d.status,
+            timestamp: new Date(d.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
+        }));
+
+        res.json({ success: true, deposits: formattedDeposits });
+    } catch (err) {
+        res.status(500).json({ message: "Error fetching deposits." });
+    }
+});
+
 
 // --- GAME SERVER & SOCKET ENGINE ---
 const server = http.createServer(app);
@@ -238,28 +369,19 @@ setInterval(() => {
 }, 1200000);
 
 function determineCrashPoint() {
-    // 1. Keep your scheduled "Signal" rounds intact if you still want them
     if (forcedRoundsRemaining > 0) {
         forcedRoundsRemaining--;
-        // Cap forced signal rounds at 20x as well, or let them use your target
         let forcedCrash = Math.min(20.00, targetMinMultiplier + (Math.random() * 5));
         return parseFloat(forcedCrash.toFixed(2));
     }
 
-    // 2. House Edge: 4% chance of instant crash at 1.00x
     if (Math.random() < 0.05) {
         return 1.00;
     }
 
-    // 3. Unpredictable Distribution capped strictly at a maximum of 20.00x
-    // Using a random roll that maps smoothly up to 20x
     const r = Math.random();
-    
-    // This formula creates an exponential distribution curve favoring lower multipliers
-    // while allowing unpredictable higher outcomes up to the 20x limit.
     let crash = 1.01 + (r * r * 9.00); 
 
-    // Hard cap guarantee at 20.00x
     if (crash > 20.00) {
         crash = 20.00;
     }
@@ -332,19 +454,15 @@ io.on("connection", (socket) => {
         io.emit("chat message", data);
     });
 
-    // --- WITHDRAWAL HANDLER WITH MONGODB PERSISTENCE ---
     socket.on("requestWithdrawal", async (data) => {
         try {
-            // Frontend passes token, phone, and amount
             const { token, phone, amount } = data;
             
             if (!token) return;
 
-            // 1. Decode token to securely get the user's account phone number
             const decoded = jwt.verify(token, JWT_SECRET);
             const userPhone = decoded.phone;
 
-            // 2. Create and save new withdrawal document in MongoDB
             const withdrawal = new Withdrawal({
                 userPhone: userPhone,
                 phone: phone,
@@ -355,7 +473,6 @@ io.on("connection", (socket) => {
 
             const formattedTime = new Date(withdrawal.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
 
-            // 3. Send immediate socket response with generated DB ID so frontend can render it
             socket.emit("withdrawalStatus", {
                 id: withdrawal._id.toString(),
                 phone: withdrawal.phone,
@@ -375,4 +492,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-                
+    
