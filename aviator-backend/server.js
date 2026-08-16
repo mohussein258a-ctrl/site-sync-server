@@ -170,13 +170,13 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
 
         const formattedPhone = formatPhoneNumber(rawPhone);
 
-        // Updated domain to modepay.live
+        // Send required ModePay API headers
         const response = await fetch("https://modepay.live/api/v1/stkpush", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                "Authorization": `Bearer ${MODEPAY_API_KEY}`,
-                "X-Secret-Key": MODEPAY_SECRET_KEY
+                "X-API-Key": MODEPAY_API_KEY,
+                "X-API-Secret": MODEPAY_SECRET_KEY
             },
             body: JSON.stringify({
                 phone: formattedPhone,
@@ -362,4 +362,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-        
+    
