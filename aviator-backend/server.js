@@ -10,9 +10,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// --- JWT & ENVIRONMENT CONFIGURATION ---
+// --- ENVIRONMENT CONFIGURATION ---
 const JWT_SECRET = process.env.JWT_SECRET || "pilot_hamoody_secret_key_2026";
 const MONGODB_URI = process.env.MONGODB_URI;
+const MODEPAY_API_KEY = process.env.MODEPAY_API_KEY;
+const MODEPAY_API_SECRET = process.env.MODEPAY_API_SECRET;
 
 if (!MONGODB_URI) {
     console.warn("⚠️ MONGODB_URI is not defined in environment variables. Make sure to add it in Render.");
@@ -25,18 +27,16 @@ if (MONGODB_URI) {
       .catch(err => console.error('❌ MongoDB Connection Error:', err));
 }
 
-// --- DATABASE SCHEMAS ---
-
-// 1. User Schema
+// --- SCHEMAS & MODELS ---
 const userSchema = new mongoose.Schema({
     phone: { type: String, required: true, unique: true },
     password: { type: String, required: true },
     userName: { type: String, required: true },
-    balance: { type: Number, default: 0 }
+    balance: { type: Number, default: 0, min: 0 }
 });
+
 const User = mongoose.model('User', userSchema);
 
-// 2. Withdrawal Schema
 const withdrawalSchema = new mongoose.Schema({
     userPhone: { type: String, required: true },
     phone: { type: String, required: true },
@@ -44,23 +44,29 @@ const withdrawalSchema = new mongoose.Schema({
     status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
 });
+
 const Withdrawal = mongoose.model('Withdrawal', withdrawalSchema);
 
-// 3. Deposit Schema (Modepay M-Pesa)
-const depositSchema = new mongoose.Schema({
-    userPhone: { type: String, required: true },
-    mpesaPhone: { type: String, required: true },
-    amount: { type: Number, required: true },
-    checkoutRequestId: { type: String, required: true }, 
-    status: { type: String, default: "Pending" }, 
-    createdAt: { type: Date, default: Date.now }
-});
-const Deposit = mongoose.model('Deposit', depositSchema);
+// --- MIDDLEWARE: AUTHENTICATION ---
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        return res.status(401).json({ message: "Unauthorized: No token provided." });
+    }
 
+    const token = authHeader.split(" ")[1];
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        req.user = decoded;
+        next();
+    } catch (err) {
+        return res.status(401).json({ message: "Invalid or expired token." });
+    }
+};
 
 // --- AUTHENTICATION & BALANCE API ROUTES ---
 
-// 1. Account Registration
+// 1. Register
 app.post('/api/register', async (req, res) => {
     try {
         const { phone, password, name } = req.body;
@@ -95,7 +101,7 @@ app.post('/api/register', async (req, res) => {
     }
 });
 
-// 2. Account Login
+// 2. Login
 app.post('/api/login', async (req, res) => {
     try {
         const { phone, password } = req.body;
@@ -132,35 +138,29 @@ app.post('/api/login', async (req, res) => {
 });
 
 // 3. Get Current Session & Balance
-app.get('/api/me', async (req, res) => {
+app.get('/api/me', authenticateToken, async (req, res) => {
     try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
-            return res.status(401).json({ message: "Unauthorized: No token provided." });
-        }
-
-        const token = authHeader.split(" ")[1];
-        const decoded = jwt.verify(token, JWT_SECRET);
-
-        const user = await User.findById(decoded.userId);
-        if (!user) {
-            return res.status(404).json({ message: "User not found." });
-        }
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).json({ message: "User not found." });
 
         res.json({
             success: true,
             user: { phone: user.phone, name: user.userName, balance: user.balance }
         });
     } catch (err) {
-        res.status(401).json({ message: "Invalid or expired token." });
+        res.status(500).json({ message: "Server error fetching user profile." });
     }
 });
 
-// 4. Update Balance (Manual/Internal)
-app.post('/api/balance', async (req, res) => {
+// 4. Update Balance
+app.post('/api/balance', authenticateToken, async (req, res) => {
     try {
-        const { phone, amount } = req.body;
-        const user = await User.findOneAndUpdate({ phone }, { balance: amount }, { new: true });
+        const { amount } = req.body;
+        if (typeof amount !== 'number' || amount < 0) {
+            return res.status(400).json({ message: "Invalid balance amount." });
+        }
+
+        const user = await User.findByIdAndUpdate(req.user.userId, { balance: amount }, { new: true });
         if (!user) return res.status(404).json({ message: "User not found" });
 
         res.json({ success: true, balance: user.balance });
@@ -170,22 +170,9 @@ app.post('/api/balance', async (req, res) => {
 });
 
 // 5. Get Withdrawal History
-app.get('/api/withdrawals', async (req, res) => {
+app.get('/api/withdrawals', authenticateToken, async (req, res) => {
     try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
-            return res.status(401).json({ message: "Unauthorized: No token provided." });
-        }
-
-        const token = authHeader.split(" ")[1];
-        const decoded = jwt.verify(token, JWT_SECRET);
-
-        const user = await User.findById(decoded.userId);
-        if (!user) {
-            return res.status(404).json({ message: "User not found." });
-        }
-
-        const withdrawals = await Withdrawal.find({ userPhone: user.phone }).sort({ createdAt: -1 });
+        const withdrawals = await Withdrawal.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
 
         const formattedWithdrawals = withdrawals.map(w => ({
             _id: w._id,
@@ -195,148 +182,92 @@ app.get('/api/withdrawals', async (req, res) => {
             timestamp: new Date(w.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
         }));
 
-        res.json({
-            success: true,
-            withdrawals: formattedWithdrawals
-        });
+        res.json({ success: true, withdrawals: formattedWithdrawals });
     } catch (err) {
         console.error("Error fetching withdrawals:", err);
         res.status(500).json({ message: "Error fetching withdrawal history." });
     }
 });
 
+// --- AUTOMATIC MODEPAY DEPOSIT ROUTES ---
 
-// --- MODEPAY DEPOSIT M-PESA INTEGRATION ---
-
-const MODEPAY_API_KEY = process.env.MODEPAY_API_KEY || "YOUR_MODEPAY_API_KEY";
-const MODEPAY_STK_URL = "https://api.modepay.com/v1/checkout/stk"; 
-const WEBHOOK_URL = process.env.WEBHOOK_URL || "https://your-production-url.onrender.com/api/deposit/webhook"; 
-
-// 6. Initiate M-Pesa STK Push
-app.post('/api/deposit/prompt', async (req, res) => {
+// Trigger M-Pesa Prompt
+app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
-            return res.status(401).json({ message: "Unauthorized." });
+        const { phone, amount } = req.body;
+
+        if (!phone || !amount || amount < 10) {
+            return res.status(400).json({ message: "Please enter a valid phone number and amount." });
         }
 
-        const token = authHeader.split(" ")[1];
-        const decoded = jwt.verify(token, JWT_SECRET);
-        
-        const { mpesaPhone, amount } = req.body;
-
-        if (amount < 500) {
-            return res.status(400).json({ message: "Minimum deposit is 500 KES." });
+        // Format phone to 254XXXXXXXXX
+        let formattedPhone = phone.trim().replace("+", "");
+        if (formattedPhone.startsWith("0")) {
+            formattedPhone = "254" + formattedPhone.slice(1);
         }
 
-        let formattedPhone = mpesaPhone.startsWith("0") ? "254" + mpesaPhone.substring(1) : mpesaPhone;
+        const hostUrl = req.protocol + '://' + req.get('host');
 
-        const response = await fetch(MODEPAY_STK_URL, {
-            method: 'POST',
+        const response = await fetch("https://api.modepay.com/v1/stkpush", { 
+            method: "POST",
             headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${MODEPAY_API_KEY}`
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${MODEPAY_API_SECRET}`,
+                "X-API-KEY": MODEPAY_API_KEY
             },
             body: JSON.stringify({
                 phoneNumber: formattedPhone,
-                amount: amount,
-                callbackUrl: WEBHOOK_URL,
-                reference: `DEP_${Date.now()}`,
-                description: "Wallet Deposit"
+                amount: Number(amount),
+                reference: `DEP_${req.user.userId}_${Date.now()}`,
+                callbackUrl: `${hostUrl}/api/deposit/callback`
             })
         });
 
         const data = await response.json();
 
-        if (response.ok && data.checkoutRequestId) {
-            const newDeposit = new Deposit({
-                userPhone: decoded.phone,
-                mpesaPhone: formattedPhone,
-                amount: amount,
-                checkoutRequestId: data.checkoutRequestId,
-                status: "Pending"
+        if (response.ok || data.success) {
+            return res.json({ 
+                success: true, 
+                message: "Prompt sent! Enter your M-Pesa PIN on your phone to complete deposit." 
             });
-            await newDeposit.save();
-
-            res.json({ success: true, message: "Prompt sent! Check your phone to enter PIN." });
         } else {
-            res.status(400).json({ message: "Failed to initiate M-Pesa prompt.", error: data });
+            return res.status(400).json({ 
+                success: false, 
+                message: data.message || "Failed to trigger payment prompt. Please try again." 
+            });
         }
     } catch (err) {
-        console.error("Deposit Prompt Error:", err);
-        res.status(500).json({ message: "Server error initiating deposit." });
+        console.error("STK Push Error:", err);
+        res.status(500).json({ message: "Server error triggering payment prompt." });
     }
 });
 
-// 7. Modepay Webhook (Listens for successful payment from M-Pesa)
-
-// ADDED: A GET route to handle gateway verification pings
-app.get('/api/deposit/webhook', (req, res) => {
-    res.status(200).json({ status: "success", message: "Webhook endpoint is active and awake." });
-});
-
-// UPDATED: Post route with immediate JSON success response
-app.post('/api/deposit/webhook', async (req, res) => {
+// ModePay Callback Listener
+app.post('/api/deposit/callback', async (req, res) => {
     try {
-        // Immediately return 200 OK so Modepay marks the webhook as successfully delivered
-        res.status(200).json({ status: "success", message: "Webhook received" });
+        const { status, reference, amount } = req.body;
 
-        const { checkoutRequestId, status, amount } = req.body; 
+        if (status === "SUCCESS" || status === "COMPLETED") {
+            const parts = reference ? reference.split("_") : [];
+            const userId = parts[1];
 
-        // Stop execution if it's just an empty test ping
-        if (!checkoutRequestId) return; 
+            if (userId) {
+                const updatedUser = await User.findByIdAndUpdate(
+                    userId, 
+                    { $inc: { balance: Number(amount) } },
+                    { new: true }
+                );
 
-        const deposit = await Deposit.findOne({ checkoutRequestId });
-        if (!deposit || deposit.status === "Completed") return;
-
-        if (status === "SUCCESS") {
-            deposit.status = "Completed";
-            await deposit.save();
-
-            const user = await User.findOne({ phone: deposit.userPhone });
-            if (user) {
-                user.balance += Number(amount);
-                await user.save();
-                
-                // Emit socket event to update balance in real-time on frontend
-                io.emit("balanceUpdated", { phone: user.phone, balance: user.balance });
+                console.log(`✅ KES ${amount} automatically credited to user ${updatedUser.phone}`);
             }
-        } else {
-            deposit.status = "Failed";
-            await deposit.save();
         }
+
+        res.status(200).json({ received: true });
     } catch (err) {
-        console.error("Webhook Error:", err);
+        console.error("ModePay Callback Error:", err);
+        res.status(500).json({ error: "Callback processing failed." });
     }
 });
-
-// 8. Get Deposit History
-app.get('/api/deposits', async (req, res) => {
-    try {
-        const authHeader = req.headers.authorization;
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
-            return res.status(401).json({ message: "Unauthorized." });
-        }
-        const token = authHeader.split(" ")[1];
-        const decoded = jwt.verify(token, JWT_SECRET);
-
-        const deposits = await Deposit.find({ userPhone: decoded.phone }).sort({ createdAt: -1 });
-        
-        // Format for frontend
-        const formattedDeposits = deposits.map(d => ({
-            _id: d._id,
-            mpesaPhone: d.mpesaPhone,
-            amount: d.amount,
-            status: d.status,
-            timestamp: new Date(d.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
-        }));
-
-        res.json({ success: true, deposits: formattedDeposits });
-    } catch (err) {
-        res.status(500).json({ message: "Error fetching deposits." });
-    }
-});
-
 
 // --- GAME SERVER & SOCKET ENGINE ---
 const server = http.createServer(app);
@@ -353,6 +284,7 @@ let gameState = {
     isFlying: false
 };
 
+let activeBets = new Map();
 let oddsHistory = [1.06, 2.19, 5.51, 1.45, 3.20]; 
 
 let intervalCount = 0;
@@ -381,7 +313,7 @@ setInterval(() => {
 function determineCrashPoint() {
     if (forcedRoundsRemaining > 0) {
         forcedRoundsRemaining--;
-        let forcedCrash = Math.min(20.00, targetMinMultiplier + (Math.random() * 5));
+        let forcedCrash = targetMinMultiplier + (Math.random() * 15);
         return parseFloat(forcedCrash.toFixed(2));
     }
 
@@ -390,21 +322,20 @@ function determineCrashPoint() {
     }
 
     const r = Math.random();
-    let crash = 1.01 + (r * r * 9.00); 
+    let crash = 1.01 + (r * r * 19.00); 
 
-    if (crash > 20.00) {
-        crash = 20.00;
-    }
+    if (crash > 20.00) crash = 20.00;
 
     return parseFloat(crash.toFixed(2));
 }
 
 function runGameLoop() {
+    activeBets.clear();
     gameState.crashPoint = determineCrashPoint();
     gameState.currentOdd = 1.00;
     gameState.isFlying = true;
 
-    io.emit("takeoff");
+    io.emit("takeoff", { crashPoint: gameState.crashPoint });
 
     const gameInterval = setInterval(() => {
         if (gameState.currentOdd >= gameState.crashPoint) {
@@ -412,9 +343,7 @@ function runGameLoop() {
             gameState.isFlying = false;
             
             oddsHistory.push(gameState.crashPoint);
-            if (oddsHistory.length > 10) {
-                oddsHistory.shift(); 
-            }
+            if (oddsHistory.length > 10) oddsHistory.shift(); 
 
             io.emit("crash", { finalOdd: gameState.crashPoint });
             setTimeout(runGameLoop, 5000); 
@@ -427,7 +356,7 @@ function runGameLoop() {
 
 runGameLoop();
 
-// Automatic Chat Bot
+// Chat Simulation
 const botMessages = [
     "Alex: Just cashed out 500 KES! 💸",
     "Sarah: Waiting for 10x 🚀",
@@ -439,12 +368,10 @@ const botMessages = [
     "Walalka: waiting for the signals.",
     "katana: just received the withdrawal 😜.",
     "Seif: aisee, leo ni leo🔥.",
-    "Dor: nani ywangojea signals? 😂.",
     "Kasim: cashed out 3500 😜.",
     "John: watu watengeze doo.",
-    "Fred: kusota tunasema bye bye 😂.",
     "Eddy: Don't just wait for signals.",
-    "Sharon: huu mwaka ni wa kununua gari aisee 💯.",
+    "Sharon: huu mwaka ni wa kununua gari aisee 💯."
 ];
 
 setInterval(() => {
@@ -464,17 +391,77 @@ io.on("connection", (socket) => {
         io.emit("chat message", data);
     });
 
+    socket.on("placeBet", async (data) => {
+        try {
+            const { token, amount } = data;
+            if (!token || !amount || amount <= 0) return;
+
+            const decoded = jwt.verify(token, JWT_SECRET);
+            const user = await User.findById(decoded.userId);
+
+            if (!user || user.balance < amount) {
+                return socket.emit("betError", { message: "Insufficient balance." });
+            }
+
+            user.balance -= amount;
+            await user.save();
+
+            activeBets.set(socket.id, {
+                userId: user._id,
+                amount: amount,
+                cashedOut: false
+            });
+
+            socket.emit("betConfirmed", { balance: user.balance, amount });
+        } catch (err) {
+            socket.emit("betError", { message: "Bet processing failed." });
+        }
+    });
+
+    socket.on("cashOut", async (data) => {
+        try {
+            const bet = activeBets.get(socket.id);
+            if (!bet || bet.cashedOut || !gameState.isFlying) return;
+
+            bet.cashedOut = true;
+            const multiplier = gameState.currentOdd;
+            const winAmount = parseFloat((bet.amount * multiplier).toFixed(2));
+
+            const user = await User.findByIdAndUpdate(
+                bet.userId, 
+                { $inc: { balance: winAmount } }, 
+                { new: true }
+            );
+
+            socket.emit("cashOutSuccess", {
+                winAmount: winAmount,
+                multiplier: multiplier,
+                newBalance: user.balance
+            });
+        } catch (err) {
+            socket.emit("cashOutError", { message: "Cashout failed." });
+        }
+    });
+
     socket.on("requestWithdrawal", async (data) => {
         try {
             const { token, phone, amount } = data;
-            
-            if (!token) return;
+            if (!token || !amount || amount <= 0) return;
 
             const decoded = jwt.verify(token, JWT_SECRET);
-            const userPhone = decoded.phone;
+            const user = await User.findById(decoded.userId);
+
+            if (!user) return;
+
+            if (user.balance < amount) {
+                return socket.emit("withdrawalError", { message: "Insufficient balance for withdrawal." });
+            }
+
+            user.balance -= amount;
+            await user.save();
 
             const withdrawal = new Withdrawal({
-                userPhone: userPhone,
+                userPhone: user.phone,
                 phone: phone,
                 amount: amount,
                 status: "Pending"
@@ -488,11 +475,13 @@ io.on("connection", (socket) => {
                 phone: withdrawal.phone,
                 amount: withdrawal.amount,
                 status: withdrawal.status,
-                timestamp: formattedTime
+                timestamp: formattedTime,
+                newBalance: user.balance
             });
 
         } catch (err) {
             console.error("Error saving withdrawal to MongoDB:", err);
+            socket.emit("withdrawalError", { message: "Server error processing withdrawal." });
         }
     });
 });
@@ -502,4 +491,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-            
+                             
