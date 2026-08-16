@@ -170,8 +170,9 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         const { amount } = req.body;
         let rawPhone = req.body.phone || req.user.phone;
 
-        if (!amount || amount < 10) {
-            return res.status(400).json({ message: "Minimum deposit is 10 KES." });
+        // Set minimum deposit requirement to 500 KES
+        if (!amount || amount < 500) {
+            return res.status(400).json({ message: "Minimum deposit is 500 KES." });
         }
 
         const formattedPhone = formatPhoneNumber(rawPhone);
@@ -184,6 +185,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
                 "X-API-Secret": MODEPAY_SECRET_KEY
             },
             body: JSON.stringify({
+                account_id: formattedPhone, // Included account_id field
                 phone: formattedPhone,
                 amount: Number(amount),
                 reference: `DEP_${Date.now()}`,
@@ -369,5 +371,4 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
-});
-                
+});          
