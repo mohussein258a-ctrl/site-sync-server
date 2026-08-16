@@ -21,7 +21,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 // Automatically trim spaces, quotes, or trailing characters from keys
 const MODEPAY_API_KEY = (process.env.MODEPAY_API_KEY || "").replace(/['"]/g, "").trim();
 const MODEPAY_SECRET_KEY = (process.env.MODEPAY_SECRET_KEY || "").replace(/['"]/g, "").trim();
-const MODEPAY_ACCOUNT_ID = (process.env.MODEPAY_ACCOUNT_ID || "1").replace(/['"]/g, "").trim();
+const MODEPAY_ACCOUNT_ID = (process.env.MODEPAY_ACCOUNT_ID || "").replace(/['"]/g, "").trim();
 
 if (!MONGODB_URI) {
     console.warn("⚠️ MONGODB_URI is not defined in Render environment variables.");
@@ -29,6 +29,10 @@ if (!MONGODB_URI) {
 
 if (!MODEPAY_API_KEY || !MODEPAY_SECRET_KEY) {
     console.warn("⚠️ ModePay API keys are missing or invalid in Render environment variables.");
+}
+
+if (!MODEPAY_ACCOUNT_ID) {
+    console.warn("⚠️ MODEPAY_ACCOUNT_ID is missing in Render environment variables.");
 }
 
 // --- MONGODB CONNECTION ---
@@ -46,6 +50,16 @@ const userSchema = new mongoose.Schema({
     balance: { type: Number, default: 0 }
 });
 const User = mongoose.model('User', userSchema);
+
+const depositSchema = new mongoose.Schema({
+    userPhone: { type: String, required: true },
+    phone: { type: String, required: true },
+    amount: { type: Number, required: true },
+    reference: { type: String, required: true },
+    status: { type: String, default: "Pending" },
+    createdAt: { type: Date, default: Date.now }
+});
+const Deposit = mongoose.model('Deposit', depositSchema);
 
 const withdrawalSchema = new mongoose.Schema({
     userPhone: { type: String, required: true },
@@ -169,14 +183,32 @@ app.post('/api/balance', authenticateToken, async (req, res) => {
 app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     try {
         const { amount } = req.body;
-        let rawPhone = req.body.phone || req.user.phone;
 
         // Minimum deposit enforced at 500 KES
-        if (!amount || amount < 500) {
+        if (!amount || Number(amount) < 500) {
             return res.status(400).json({ message: "Minimum deposit is 500 KES." });
         }
 
-        const formattedPhone = formatPhoneNumber(rawPhone);
+        // Strictly enforce account's registered phone number from auth token
+        const userPhone = req.user.phone;
+        const formattedPhone = formatPhoneNumber(userPhone);
+        const accountId = Number(MODEPAY_ACCOUNT_ID);
+
+        if (!accountId || isNaN(accountId)) {
+            return res.status(500).json({ message: "Server configuration error: Invalid or missing MODEPAY_ACCOUNT_ID." });
+        }
+
+        const reference = `DEP_${Date.now()}`;
+
+        // Create pending deposit entry in database
+        const newDeposit = new Deposit({
+            userPhone: userPhone,
+            phone: formattedPhone,
+            amount: Number(amount),
+            reference: reference,
+            status: "Pending"
+        });
+        await newDeposit.save();
 
         const response = await fetch("https://modepay.live/api/v1/stkpush", {
             method: "POST",
@@ -186,21 +218,22 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
                 "X-API-Secret": MODEPAY_SECRET_KEY
             },
             body: JSON.stringify({
-                account_id: Number(MODEPAY_ACCOUNT_ID),
+                account_id: accountId,
                 phone: formattedPhone,
                 amount: Number(amount),
-                reference: `DEP_${Date.now()}`,
+                reference: reference,
                 callback_url: `https://${req.get('host')}/api/deposit/callback`
             })
         });
 
         const data = await response.json();
-        
         console.log("ModePay Response Status:", response.status, JSON.stringify(data));
 
         if (response.ok && (data.success || data.status === "success" || data.ResponseCode === "0")) {
             return res.json({ success: true, message: "M-Pesa STK Push sent to your phone! Enter your PIN." });
         } else {
+            newDeposit.status = "Failed";
+            await newDeposit.save();
             const errMsg = data.message || data.error || data.ResponseDescription || data.msg || "ModePay API request rejected.";
             return res.status(400).json({ message: errMsg });
         }
@@ -210,24 +243,41 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     }
 });
 
-// Callback Webhook to Credit User Balance Automatically
+// Callback Webhook to Credit User Balance & Update Transaction History
 app.post('/api/deposit/callback', async (req, res) => {
     try {
-        const payload = req.body;
+        const payload = req.body || {};
         console.log("📥 ModePay Callback Received:", JSON.stringify(payload));
 
-        const status = payload.status || payload.ResultCode;
-        const amount = Number(payload.amount || payload.Amount);
-        const phone = payload.phone || payload.PhoneNumber;
+        const status = (payload.status || payload.ResultCode || payload.resultCode || "").toString().toUpperCase();
+        const amount = Number(payload.amount || payload.Amount || payload.transAmount || 0);
+        const phone = payload.phone || payload.PhoneNumber || payload.MSISDN || payload.msisdn;
+        const reference = payload.reference || payload.mpesaReceiptNumber || payload.MpesaReceiptNumber || payload.CheckoutRequestID;
 
-        if ((status === "SUCCESS" || status === 0 || status === "0") && amount > 0 && phone) {
-            const cleanPhone = phone.toString().slice(-9);
-            const user = await User.findOne({ phone: { $regex: cleanPhone } });
+        const isSuccess = status === "SUCCESS" || status === "0" || status === "COMPLETED" || payload.ResultCode === 0;
+
+        if (isSuccess && amount > 0) {
+            let user = null;
+
+            if (reference) {
+                const depositRecord = await Deposit.findOne({ reference });
+                if (depositRecord) {
+                    depositRecord.status = "Completed";
+                    await depositRecord.save();
+                    user = await User.findOne({ phone: depositRecord.userPhone });
+                }
+            }
+
+            if (!user && phone) {
+                const cleanPhone = phone.toString().slice(-9);
+                user = await User.findOne({ phone: { $regex: cleanPhone } });
+            }
 
             if (user) {
                 user.balance += amount;
                 await user.save();
-                console.log(`✅ Balance Credited: KES ${amount} to ${user.phone}`);
+                console.log(`✅ Balance Credited: KES ${amount} to ${user.phone}. New Balance: KES ${user.balance}`);
+                io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
             }
         }
 
@@ -238,7 +288,25 @@ app.post('/api/deposit/callback', async (req, res) => {
     }
 });
 
-// --- WITHDRAWAL ROUTES ---
+// --- DEPOSIT & WITHDRAWAL HISTORY ROUTES ---
+
+app.get('/api/deposits', authenticateToken, async (req, res) => {
+    try {
+        const deposits = await Deposit.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
+        const formattedDeposits = deposits.map(d => ({
+            _id: d._id,
+            phone: d.phone,
+            amount: d.amount,
+            status: d.status,
+            reference: d.reference,
+            timestamp: new Date(d.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
+        }));
+
+        res.json({ success: true, deposits: formattedDeposits });
+    } catch (err) {
+        res.status(500).json({ message: "Error fetching deposit history." });
+    }
+});
 
 app.get('/api/withdrawals', authenticateToken, async (req, res) => {
     try {
