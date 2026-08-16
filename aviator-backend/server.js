@@ -7,6 +7,10 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 
 const app = express();
+
+// Enable trust proxy so Render passes HTTPS protocols cleanly
+app.set("trust proxy", 1);
+
 app.use(cors());
 app.use(express.json());
 
@@ -166,8 +170,8 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
 
         const formattedPhone = formatPhoneNumber(rawPhone);
 
-        // Request STK Push via ModePay API
-        const response = await fetch("https://api.modepay.co.ke/v1/stkpush", {
+        // Updated domain to modepay.live
+        const response = await fetch("https://modepay.live/api/v1/stkpush", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -178,7 +182,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
                 phone: formattedPhone,
                 amount: Number(amount),
                 reference: `DEP_${Date.now()}`,
-                callback_url: `${req.protocol}://${req.get('host')}/api/deposit/callback`
+                callback_url: `https://${req.get('host')}/api/deposit/callback`
             })
         });
 
@@ -358,4 +362,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-            
+        
