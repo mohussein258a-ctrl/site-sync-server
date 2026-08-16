@@ -21,6 +21,7 @@ const MONGODB_URI = process.env.MONGODB_URI;
 // Automatically trim spaces, quotes, or trailing characters from keys
 const MODEPAY_API_KEY = (process.env.MODEPAY_API_KEY || "").replace(/['"]/g, "").trim();
 const MODEPAY_SECRET_KEY = (process.env.MODEPAY_SECRET_KEY || "").replace(/['"]/g, "").trim();
+const MODEPAY_ACCOUNT_ID = (process.env.MODEPAY_ACCOUNT_ID || "1").replace(/['"]/g, "").trim();
 
 if (!MONGODB_URI) {
     console.warn("⚠️ MONGODB_URI is not defined in Render environment variables.");
@@ -170,7 +171,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         const { amount } = req.body;
         let rawPhone = req.body.phone || req.user.phone;
 
-        // Set minimum deposit requirement to 500 KES
+        // Minimum deposit enforced at 500 KES
         if (!amount || amount < 500) {
             return res.status(400).json({ message: "Minimum deposit is 500 KES." });
         }
@@ -185,7 +186,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
                 "X-API-Secret": MODEPAY_SECRET_KEY
             },
             body: JSON.stringify({
-                account_id: formattedPhone, // Included account_id field
+                account_id: Number(MODEPAY_ACCOUNT_ID),
                 phone: formattedPhone,
                 amount: Number(amount),
                 reference: `DEP_${Date.now()}`,
@@ -371,4 +372,5 @@ io.on("connection", (socket) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
-});          
+});
+    
