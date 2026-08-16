@@ -269,12 +269,22 @@ app.post('/api/deposit/prompt', async (req, res) => {
 });
 
 // 7. Modepay Webhook (Listens for successful payment from M-Pesa)
+
+// ADDED: A GET route to handle gateway verification pings
+app.get('/api/deposit/webhook', (req, res) => {
+    res.status(200).json({ status: "success", message: "Webhook endpoint is active and awake." });
+});
+
+// UPDATED: Post route with immediate JSON success response
 app.post('/api/deposit/webhook', async (req, res) => {
     try {
+        // Immediately return 200 OK so Modepay marks the webhook as successfully delivered
+        res.status(200).json({ status: "success", message: "Webhook received" });
+
         const { checkoutRequestId, status, amount } = req.body; 
 
-        // Always acknowledge receipt of webhook immediately to prevent Modepay retries
-        res.status(200).send("Webhook received");
+        // Stop execution if it's just an empty test ping
+        if (!checkoutRequestId) return; 
 
         const deposit = await Deposit.findOne({ checkoutRequestId });
         if (!deposit || deposit.status === "Completed") return;
@@ -492,4 +502,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-    
+            
