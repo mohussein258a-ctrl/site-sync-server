@@ -8,6 +8,11 @@ const jwt = require("jsonwebtoken");
 
 const app = express();
 
+// --- SERVER & SOCKET INITIALIZATION ---
+// Moved to the top so 'io' is safely accessible inside the webhook routes
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
+
 // Enable trust proxy so Render passes HTTPS protocols cleanly
 app.set("trust proxy", 1);
 
@@ -182,12 +187,16 @@ app.post('/api/balance', authenticateToken, async (req, res) => {
 // Trigger M-Pesa STK Push Prompt
 app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     try {
-        const { amount } = req.body;
+        const depositAmount = Number(req.body.amount);
 
         // Minimum deposit enforced at 500 KES
-        if (!amount || Number(amount) < 500) {
+        if (!depositAmount || depositAmount < 500) {
             return res.status(400).json({ message: "Minimum deposit is 500 KES." });
         }
+
+        // Add 15 KES transaction fee for ModePay request
+        const transactionFee = 15;
+        const totalAmountToPay = depositAmount + transactionFee;
 
         // Strictly enforce account's registered phone number from auth token
         const userPhone = req.user.phone;
@@ -200,11 +209,11 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
 
         const reference = `DEP_${Date.now()}`;
 
-        // Create pending deposit entry in database
+        // Create pending deposit entry in database (Saving the base deposit amount without fee)
         const newDeposit = new Deposit({
             userPhone: userPhone,
             phone: formattedPhone,
-            amount: Number(amount),
+            amount: depositAmount, 
             reference: reference,
             status: "Pending"
         });
@@ -220,7 +229,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
             body: JSON.stringify({
                 account_id: accountId,
                 phone: formattedPhone,
-                amount: Number(amount),
+                amount: totalAmountToPay, // ModePay charges deposit + 15 KES
                 reference: reference,
                 callback_url: `https://${req.get('host')}/api/deposit/callback`
             })
@@ -230,7 +239,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         console.log("ModePay Response Status:", response.status, JSON.stringify(data));
 
         if (response.ok && (data.success || data.status === "success" || data.ResponseCode === "0")) {
-            return res.json({ success: true, message: "M-Pesa STK Push sent to your phone! Enter your PIN." });
+            return res.json({ success: true, message: `M-Pesa STK Push for ${totalAmountToPay} KES (incl. fee) sent to your phone! Enter your PIN.` });
         } else {
             newDeposit.status = "Failed";
             await newDeposit.save();
@@ -247,61 +256,55 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
 app.post('/api/deposit/callback', async (req, res) => {
     try {
         const payload = req.body || {};
-        console.log("📥 ModePay Webhook Received:", JSON.stringify(payload));
+        console.log("📥 ModePay Callback Received:", JSON.stringify(payload));
 
-        // Extract relevant data from the ModePay payload
         const status = (payload.status || payload.ResultCode || payload.resultCode || "").toString().toUpperCase();
-        const amount = Number(payload.amount || payload.Amount || payload.transAmount || 0);
         const reference = payload.reference || payload.mpesaReceiptNumber || payload.MpesaReceiptNumber || payload.CheckoutRequestID;
 
-        // Determine if the transaction was successful
-        const isSuccess = status === "SUCCESS" || status === "0" || status === "COMPLETED" || status === "SUCCESSFUL" || payload.ResultCode === 0;
+        // Check for successful payment status
+        const isSuccess = status === "SUCCESS" || status === "0" || status === "COMPLETED" || payload.ResultCode === 0;
 
-        if (reference) {
-            // Find the pending deposit in MongoDB
-            const depositRecord = await Deposit.findOne({ reference });
-
-            if (depositRecord) {
-                // 1. Prevent Double-Crediting
-                if (depositRecord.status === "Completed") {
-                    console.log(`⚠️ Webhook duplicate: Deposit ${reference} is already completed.`);
-                    return res.status(200).json({ ResponseCode: 0, ResponseDesc: "Already Processed" });
-                }
-
-                // 2. Handle Successful Payment
-                if (isSuccess && amount > 0) {
-                    depositRecord.status = "Completed";
-                    await depositRecord.save();
-
-                    const user = await User.findOne({ phone: depositRecord.userPhone });
-                    if (user) {
-                        user.balance += amount;
-                        await user.save();
-                        console.log(`✅ Balance Credited: KES ${amount} to ${user.phone}. New Balance: KES ${user.balance}`);
-
-                        // Emit socket event to instantly update the frontend balance
-                        io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
-                    }
-                } 
-                // 3. Handle Failed Payment
-                else if (!isSuccess) {
-                    depositRecord.status = "Failed";
-                    await depositRecord.save();
-                    console.log(`❌ Deposit Failed for reference: ${reference}`);
-                    
-                    // Optional: Emit a failure event to the frontend if you want to show an error toast
-                    io.emit("paymentFailed", { userPhone: depositRecord.userPhone, message: "Payment was not successful." });
-                }
-            } else {
-                console.warn(`⚠️ Webhook received for unknown reference: ${reference}`);
-            }
+        if (!reference) {
+            return res.status(400).json({ message: "No reference provided in callback" });
         }
 
-        // Acknowledge receipt to ModePay so they stop sending the webhook
+        const depositRecord = await Deposit.findOne({ reference });
+        
+        if (!depositRecord) {
+            console.error(`❌ Deposit record not found for reference: ${reference}`);
+            return res.status(200).json({ ResponseCode: 0, ResponseDesc: "Acknowledged but record not found" });
+        }
+
+        // Only process if status is still Pending to avoid double crediting
+        if (depositRecord.status !== "Pending") {
+            return res.status(200).json({ ResponseCode: 0, ResponseDesc: "Already processed" });
+        }
+
+        if (isSuccess) {
+            depositRecord.status = "Completed";
+            await depositRecord.save();
+
+            const user = await User.findOne({ phone: depositRecord.userPhone });
+            
+            if (user) {
+                // Credit only the original deposit amount, omitting the 15 KES fee
+                user.balance += depositRecord.amount;
+                await user.save();
+                
+                console.log(`✅ Balance Credited: KES ${depositRecord.amount} to ${user.phone}. New Balance: KES ${user.balance}`);
+                io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
+            }
+        } else {
+            // Update to Failed if the transaction was rejected/cancelled by user
+            depositRecord.status = "Failed";
+            await depositRecord.save();
+            console.log(`❌ Deposit Failed for reference: ${reference}`);
+        }
+
         res.status(200).json({ ResponseCode: 0, ResponseDesc: "Success" });
     } catch (err) {
-        console.error("Webhook processing error:", err);
-        res.status(500).json({ message: "Webhook processing failed." });
+        console.error("Callback processing error:", err);
+        res.status(500).json({ message: "Callback processing failed." });
     }
 });
 
@@ -343,8 +346,6 @@ app.get('/api/withdrawals', authenticateToken, async (req, res) => {
 });
 
 // --- GAME SERVER & SOCKET ENGINE ---
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
 let gameState = { currentOdd: 1.00, crashPoint: 1.00, isFlying: false };
 let oddsHistory = [1.06, 2.19, 5.51, 1.45, 3.20]; 
@@ -458,4 +459,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-        
+                                  
