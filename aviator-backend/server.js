@@ -247,44 +247,61 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
 app.post('/api/deposit/callback', async (req, res) => {
     try {
         const payload = req.body || {};
-        console.log("📥 ModePay Callback Received:", JSON.stringify(payload));
+        console.log("📥 ModePay Webhook Received:", JSON.stringify(payload));
 
+        // Extract relevant data from the ModePay payload
         const status = (payload.status || payload.ResultCode || payload.resultCode || "").toString().toUpperCase();
         const amount = Number(payload.amount || payload.Amount || payload.transAmount || 0);
-        const phone = payload.phone || payload.PhoneNumber || payload.MSISDN || payload.msisdn;
         const reference = payload.reference || payload.mpesaReceiptNumber || payload.MpesaReceiptNumber || payload.CheckoutRequestID;
 
-        const isSuccess = status === "SUCCESS" || status === "0" || status === "COMPLETED" || payload.ResultCode === 0;
+        // Determine if the transaction was successful
+        const isSuccess = status === "SUCCESS" || status === "0" || status === "COMPLETED" || status === "SUCCESSFUL" || payload.ResultCode === 0;
 
-        if (isSuccess && amount > 0) {
-            let user = null;
+        if (reference) {
+            // Find the pending deposit in MongoDB
+            const depositRecord = await Deposit.findOne({ reference });
 
-            if (reference) {
-                const depositRecord = await Deposit.findOne({ reference });
-                if (depositRecord) {
+            if (depositRecord) {
+                // 1. Prevent Double-Crediting
+                if (depositRecord.status === "Completed") {
+                    console.log(`⚠️ Webhook duplicate: Deposit ${reference} is already completed.`);
+                    return res.status(200).json({ ResponseCode: 0, ResponseDesc: "Already Processed" });
+                }
+
+                // 2. Handle Successful Payment
+                if (isSuccess && amount > 0) {
                     depositRecord.status = "Completed";
                     await depositRecord.save();
-                    user = await User.findOne({ phone: depositRecord.userPhone });
+
+                    const user = await User.findOne({ phone: depositRecord.userPhone });
+                    if (user) {
+                        user.balance += amount;
+                        await user.save();
+                        console.log(`✅ Balance Credited: KES ${amount} to ${user.phone}. New Balance: KES ${user.balance}`);
+
+                        // Emit socket event to instantly update the frontend balance
+                        io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
+                    }
+                } 
+                // 3. Handle Failed Payment
+                else if (!isSuccess) {
+                    depositRecord.status = "Failed";
+                    await depositRecord.save();
+                    console.log(`❌ Deposit Failed for reference: ${reference}`);
+                    
+                    // Optional: Emit a failure event to the frontend if you want to show an error toast
+                    io.emit("paymentFailed", { userPhone: depositRecord.userPhone, message: "Payment was not successful." });
                 }
-            }
-
-            if (!user && phone) {
-                const cleanPhone = phone.toString().slice(-9);
-                user = await User.findOne({ phone: { $regex: cleanPhone } });
-            }
-
-            if (user) {
-                user.balance += amount;
-                await user.save();
-                console.log(`✅ Balance Credited: KES ${amount} to ${user.phone}. New Balance: KES ${user.balance}`);
-                io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
+            } else {
+                console.warn(`⚠️ Webhook received for unknown reference: ${reference}`);
             }
         }
 
+        // Acknowledge receipt to ModePay so they stop sending the webhook
         res.status(200).json({ ResponseCode: 0, ResponseDesc: "Success" });
     } catch (err) {
-        console.error("Callback processing error:", err);
-        res.status(500).json({ message: "Callback processing failed." });
+        console.error("Webhook processing error:", err);
+        res.status(500).json({ message: "Webhook processing failed." });
     }
 });
 
@@ -441,4 +458,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-    
+        
