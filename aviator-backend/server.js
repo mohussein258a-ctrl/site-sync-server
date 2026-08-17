@@ -252,17 +252,17 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     }
 });
 
-// Callback Webhook to Credit User Balance & Update Transaction History
+// Callback Webhook to Credit User Balance & Update Transaction History (Updated for ModePay API v2 payload structure)
 app.post('/api/deposit/callback', async (req, res) => {
     try {
         const payload = req.body || {};
         console.log("📥 ModePay Callback Received:", JSON.stringify(payload));
 
-        const status = (payload.status || payload.ResultCode || payload.resultCode || "").toString().toUpperCase();
-        const reference = payload.reference || payload.mpesaReceiptNumber || payload.MpesaReceiptNumber || payload.CheckoutRequestID;
-
-        // Check for successful payment status
-        const isSuccess = status === "SUCCESS" || status === "0" || status === "COMPLETED" || payload.ResultCode === 0;
+        const eventType = payload.event; // e.g., "payment.completed", "payment.failed"
+        const data = payload.data || {};
+        
+        const reference = data.external_reference || data.checkout_request_id || data.transaction_id;
+        const transactionStatus = (data.transaction_status || "").toLowerCase();
 
         if (!reference) {
             return res.status(400).json({ message: "No reference provided in callback" });
@@ -275,12 +275,12 @@ app.post('/api/deposit/callback', async (req, res) => {
             return res.status(200).json({ ResponseCode: 0, ResponseDesc: "Acknowledged but record not found" });
         }
 
-        // Only process if status is still Pending to avoid double crediting
+        // Only process if status is still Pending to avoid double processing
         if (depositRecord.status !== "Pending") {
             return res.status(200).json({ ResponseCode: 0, ResponseDesc: "Already processed" });
         }
 
-        if (isSuccess) {
+        if (eventType === "payment.completed" || transactionStatus === "completed") {
             depositRecord.status = "Completed";
             await depositRecord.save();
 
@@ -294,8 +294,7 @@ app.post('/api/deposit/callback', async (req, res) => {
                 console.log(`✅ Balance Credited: KES ${depositRecord.amount} to ${user.phone}. New Balance: KES ${user.balance}`);
                 io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
             }
-        } else {
-            // Update to Failed if the transaction was rejected/cancelled by user
+        } else if (eventType === "payment.failed" || transactionStatus === "failed") {
             depositRecord.status = "Failed";
             await depositRecord.save();
             console.log(`❌ Deposit Failed for reference: ${reference}`);
@@ -459,4 +458,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-                                  
+                           
