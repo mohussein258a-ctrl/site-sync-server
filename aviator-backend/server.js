@@ -50,7 +50,9 @@ const User = mongoose.model('User', userSchema);
 const depositSchema = new mongoose.Schema({
     userPhone: { type: String, required: true },
     phone: { type: String, required: true },
-    amount: { type: Number, required: true },
+    amount: { type: Number, required: true },       // Base deposit amount
+    tax: { type: Number, required: true },          // 15% tax fee
+    totalAmount: { type: Number, required: true },  // Total requested from M-Pesa
     reference: { type: String, required: true },
     status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
@@ -143,7 +145,6 @@ app.get('/api/me', authenticateToken, async (req, res) => {
 });
 
 // --- MODEPAY DEPOSIT ROUTES ---
-
 app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     try {
         const depositAmount = Number(req.body.amount);
@@ -152,7 +153,8 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: "Minimum deposit is 500 KES." });
         }
 
-        const transactionFee = 15;
+        // 15% Deposit Tax Calculation
+        const transactionFee = depositAmount * 0.15;
         const totalAmountToPay = depositAmount + transactionFee;
 
         const userPhone = req.user.phone;
@@ -165,6 +167,8 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
             userPhone: userPhone,
             phone: formattedPhone,
             amount: depositAmount, 
+            tax: transactionFee,
+            totalAmount: totalAmountToPay,
             reference: reference,
             status: "Pending"
         });
@@ -189,7 +193,13 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         const data = await response.json();
 
         if (response.ok && (data.success || data.status === "success" || data.ResponseCode === "0")) {
-            return res.json({ success: true, reference: reference, message: `M-Pesa STK Push sent! Enter PIN.` });
+            return res.json({ 
+                success: true, 
+                reference: reference, 
+                taxAmount: transactionFee, // Used for frontend UI display
+                totalAmount: totalAmountToPay,
+                message: `M-Pesa STK Push sent! Total: ${totalAmountToPay} KES. Enter PIN.` 
+            });
         } else {
             newDeposit.status = "Failed";
             await newDeposit.save();
@@ -200,7 +210,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     }
 });
 
-// NEW: Polling Endpoint for Frontend to Check Status
+// Polling Endpoint for Frontend to Check Status
 app.post('/api/deposit/verify', authenticateToken, async (req, res) => {
     try {
         const { reference } = req.body;
@@ -216,7 +226,6 @@ app.post('/api/deposit/verify', authenticateToken, async (req, res) => {
         }
 
         // Poll ModePay for the actual status
-        // *Note: Adjust URL to exact ModePay verify endpoint if different*
         const response = await fetch("https://modepay.live/api/v1/transaction/status", {
             method: "POST",
             headers: {
@@ -238,7 +247,7 @@ app.post('/api/deposit/verify', authenticateToken, async (req, res) => {
             await deposit.save();
 
             const user = await User.findOne({ phone: deposit.userPhone });
-            user.balance += deposit.amount;
+            user.balance += deposit.amount; // Only credit the base amount, not the tax
             await user.save();
             
             io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
@@ -278,7 +287,7 @@ app.post('/api/deposit/callback', async (req, res) => {
 
             const user = await User.findOne({ phone: depositRecord.userPhone });
             if (user) {
-                user.balance += depositRecord.amount;
+                user.balance += depositRecord.amount; // Only credit the base amount
                 await user.save();
                 io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
             }
@@ -297,7 +306,7 @@ app.get('/api/deposits', authenticateToken, async (req, res) => {
     try {
         const deposits = await Deposit.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
         const formattedDeposits = deposits.map(d => ({
-            _id: d._id, amount: d.amount, status: d.status, reference: d.reference,
+            _id: d._id, amount: d.amount, tax: d.tax, totalAmount: d.totalAmount, status: d.status, reference: d.reference,
             timestamp: new Date(d.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
         }));
         res.json({ success: true, deposits: formattedDeposits });
@@ -374,7 +383,7 @@ io.on("connection", (socket) => {
     socket.emit("sync", { currentOdd: gameState.currentOdd, isFlying: gameState.isFlying, history: oddsHistory });
     socket.on("chat message", (data) => io.emit("chat message", data));
 
-    // UPDATED WITHDRAWAL LOGIC
+    // --- WITHDRAWAL LOGIC ---
     socket.on("requestWithdrawal", async (data) => {
         try {
             const { token, phone, amount } = data;
@@ -428,4 +437,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-          
+                                                          
