@@ -208,7 +208,7 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: "Minimum withdrawal is 4000 KES." });
         }
 
-        // Calculate 20% Tax
+        // Calculate 20% Tax (Updated from 15%)
         const taxAmount = Math.ceil(requestedWithdrawal * 0.20);
         const formattedPhone = formatPhoneNumber(req.body.phone || req.user.phone);
         const reference = `TAX_${Date.now()}`;
@@ -259,6 +259,16 @@ app.get('/api/tax/status/:reference', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Error checking tax status." }); }
 });
 
+// --- WITHDRAWAL HISTORY ENDPOINT ---
+app.get('/api/withdrawals/history', authenticateToken, async (req, res) => {
+    try {
+        const withdrawals = await Withdrawal.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
+        res.json({ success: true, withdrawals });
+    } catch (err) {
+        res.status(500).json({ message: "Error fetching withdrawal history." });
+    }
+});
+
 // --- GAME SERVER & SOCKET ENGINE ---
 let gameState = { currentOdd: 1.00, crashPoint: 1.00, isFlying: false };
 let oddsHistory = [1.06, 2.19, 5.51, 1.45, 3.20]; 
@@ -291,6 +301,18 @@ function runGameLoop() {
 }
 runGameLoop();
 
+// Chat Bot Messages
+const botMessages = [
+    "Alex: Just cashed out 500 KES! 💸", "Sarah: Waiting for 10x 🚀",
+    "Kevo: Wow, crashed so fast 😭", "Mike: Let's goooo!",
+    "Mwangi: Nice win right there.", "Kasim: cashed out 3500 😜."
+];
+
+setInterval(() => {
+    const randomMsg = botMessages[Math.floor(Math.random() * botMessages.length)];
+    io.emit("chat message", randomMsg);
+}, 5000); 
+
 // Socket Event Handlers
 io.on("connection", (socket) => {
     socket.emit("sync", { currentOdd: gameState.currentOdd, isFlying: gameState.isFlying, history: oddsHistory });
@@ -314,28 +336,28 @@ io.on("connection", (socket) => {
             const taxPayment = await TaxPayment.findOne({ 
                 reference: taxReference, 
                 userPhone: user.phone, 
-                status: "Completed" // Must be completed, not "Pending" or "Used"
+                status: "Completed" 
             });
 
             if (!taxPayment) {
                 return socket.emit("withdrawalError", { message: "Capital gains tax not paid, still pending, or already used." });
             }
 
-            // 4. SECURITY CHECK: Ensure the tax paid actually matches 20% of THIS withdrawal request
+            // 4. SECURITY CHECK: Ensure the tax paid matches 20% of THIS withdrawal request (Updated from 15%)
             const requiredTax = Math.ceil(amount * 0.20);
             if (taxPayment.amount < requiredTax) {
-                return socket.emit("withdrawalError", { message: "The tax paid is insufficient for this withdrawal amount." });
+                return socket.emit("withdrawalError", { message: "The tax paid is insufficient for this withdrawal amount. 20% tax required." });
             }
 
             // 5. Process withdrawal & deduct balance
             user.balance -= amount;
             await user.save();
 
-            // 6. SECURITY CHECK: Mark the tax receipt as "Used" so they can't reuse it for another withdrawal
+            // 6. Mark the tax receipt as "Used"
             taxPayment.status = "Used";
             await taxPayment.save();
 
-            // 7. Save the final withdrawal to history
+            // 7. Save the final withdrawal to history (Status starts as Pending or Completed based on integration flow)
             const withdrawal = new Withdrawal({ userPhone: user.phone, phone, amount, status: "Pending" });
             await withdrawal.save();
 
@@ -355,4 +377,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-                    
+        
