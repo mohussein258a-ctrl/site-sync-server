@@ -195,7 +195,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         }
 
         // Add 15 KES transaction fee for ModePay request
-        const transactionFee = 15;
+        const transactionFee = 5%;
         const totalAmountToPay = depositAmount + transactionFee;
 
         // Strictly enforce account's registered phone number from auth token
