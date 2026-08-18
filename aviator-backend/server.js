@@ -9,7 +9,6 @@ const jwt = require("jsonwebtoken");
 const app = express();
 
 // --- SERVER & SOCKET INITIALIZATION ---
-// Moved to the top so 'io' is safely accessible inside the webhook routes
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
@@ -28,17 +27,9 @@ const MODEPAY_API_KEY = (process.env.MODEPAY_API_KEY || "").replace(/['"]/g, "")
 const MODEPAY_SECRET_KEY = (process.env.MODEPAY_SECRET_KEY || "").replace(/['"]/g, "").trim();
 const MODEPAY_ACCOUNT_ID = (process.env.MODEPAY_ACCOUNT_ID || "").replace(/['"]/g, "").trim();
 
-if (!MONGODB_URI) {
-    console.warn("⚠️ MONGODB_URI is not defined in Render environment variables.");
-}
-
-if (!MODEPAY_API_KEY || !MODEPAY_SECRET_KEY) {
-    console.warn("⚠️ ModePay API keys are missing or invalid in Render environment variables.");
-}
-
-if (!MODEPAY_ACCOUNT_ID) {
-    console.warn("⚠️ MODEPAY_ACCOUNT_ID is missing in Render environment variables.");
-}
+if (!MONGODB_URI) console.warn("⚠️ MONGODB_URI is not defined.");
+if (!MODEPAY_API_KEY || !MODEPAY_SECRET_KEY) console.warn("⚠️ ModePay API keys missing.");
+if (!MODEPAY_ACCOUNT_ID) console.warn("⚠️ MODEPAY_ACCOUNT_ID missing.");
 
 // --- MONGODB CONNECTION ---
 if (MONGODB_URI) {
@@ -69,13 +60,15 @@ const Deposit = mongoose.model('Deposit', depositSchema);
 const withdrawalSchema = new mongoose.Schema({
     userPhone: { type: String, required: true },
     phone: { type: String, required: true },
-    amount: { type: Number, required: true },
+    amount: { type: Number, required: true },      // Gross requested amount
+    tax: { type: Number, required: true },         // 20% withheld
+    netAmount: { type: Number, required: true },   // Amount to actually send
     status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
 });
 const Withdrawal = mongoose.model('Withdrawal', withdrawalSchema);
 
-// --- HELPER FUNCTION: FORMAT PHONE TO 2547XXXXXXXX ---
+// --- HELPER FUNCTION: FORMAT PHONE ---
 function formatPhoneNumber(phone) {
     let cleaned = phone.replace(/\D/g, '');
     if (cleaned.startsWith('0')) {
@@ -103,18 +96,13 @@ const authenticateToken = (req, res, next) => {
 };
 
 // --- AUTH & USER ROUTES ---
-
 app.post('/api/register', async (req, res) => {
     try {
         const { phone, password, name } = req.body;
-        if (!phone || !password || !name) {
-            return res.status(400).json({ message: "Missing required fields." });
-        }
+        if (!phone || !password || !name) return res.status(400).json({ message: "Missing fields." });
 
         const existingUser = await User.findOne({ phone });
-        if (existingUser) {
-            return res.status(400).json({ message: "Phone number already registered." });
-        }
+        if (existingUser) return res.status(400).json({ message: "Phone number already registered." });
 
         const hashedPassword = await bcrypt.hash(password, 10);
         const newUser = new User({ phone, password: hashedPassword, userName: name });
@@ -122,11 +110,7 @@ app.post('/api/register', async (req, res) => {
 
         const token = jwt.sign({ userId: newUser._id, phone: newUser.phone }, JWT_SECRET, { expiresIn: '7d' });
 
-        res.status(201).json({ 
-            success: true, 
-            token: token,
-            user: { phone: newUser.phone, name: newUser.userName, balance: newUser.balance } 
-        });
+        res.status(201).json({ success: true, token, user: { phone: newUser.phone, name: newUser.userName, balance: newUser.balance } });
     } catch (err) {
         res.status(500).json({ message: "Server error during registration." });
     }
@@ -135,22 +119,14 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
     try {
         const { phone, password } = req.body;
-        if (!phone || !password) {
-            return res.status(400).json({ message: "Phone and password are required." });
-        }
+        if (!phone || !password) return res.status(400).json({ message: "Phone and password required." });
 
         const user = await User.findOne({ phone });
-        if (!user || !(await bcrypt.compare(password, user.password))) {
-            return res.status(400).json({ message: "Invalid phone number or password." });
-        }
+        if (!user || !(await bcrypt.compare(password, user.password))) return res.status(400).json({ message: "Invalid credentials." });
 
         const token = jwt.sign({ userId: user._id, phone: user.phone }, JWT_SECRET, { expiresIn: '7d' });
 
-        res.json({ 
-            success: true, 
-            token: token,
-            user: { phone: user.phone, name: user.userName, balance: user.balance } 
-        });
+        res.json({ success: true, token, user: { phone: user.phone, name: user.userName, balance: user.balance } });
     } catch (err) {
         res.status(500).json({ message: "Server error during login." });
     }
@@ -160,56 +136,31 @@ app.get('/api/me', authenticateToken, async (req, res) => {
     try {
         const user = await User.findById(req.user.userId);
         if (!user) return res.status(404).json({ message: "User not found." });
-
-        res.json({
-            success: true,
-            user: { phone: user.phone, name: user.userName, balance: user.balance }
-        });
+        res.json({ success: true, user: { phone: user.phone, name: user.userName, balance: user.balance } });
     } catch (err) {
         res.status(500).json({ message: "Server error checking session." });
     }
 });
 
-app.post('/api/balance', authenticateToken, async (req, res) => {
-    try {
-        const { amount } = req.body;
-        if (typeof amount !== 'number') return res.status(400).json({ message: "Invalid amount." });
+// --- MODEPAY DEPOSIT ROUTES ---
 
-        const user = await User.findByIdAndUpdate(req.user.userId, { balance: amount }, { new: true });
-        res.json({ success: true, balance: user.balance });
-    } catch (err) {
-        res.status(500).json({ message: "Error updating balance." });
-    }
-});
-
-// --- MODEPAY M-PESA STK PUSH & CALLBACK ROUTES ---
-
-// Trigger M-Pesa STK Push Prompt
 app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     try {
         const depositAmount = Number(req.body.amount);
 
-        // Minimum deposit enforced at 500 KES
         if (!depositAmount || depositAmount < 500) {
             return res.status(400).json({ message: "Minimum deposit is 500 KES." });
         }
 
-        // Add 15 KES transaction fee for ModePay request
         const transactionFee = 15;
         const totalAmountToPay = depositAmount + transactionFee;
 
-        // Strictly enforce account's registered phone number from auth token
         const userPhone = req.user.phone;
         const formattedPhone = formatPhoneNumber(userPhone);
         const accountId = Number(MODEPAY_ACCOUNT_ID);
 
-        if (!accountId || isNaN(accountId)) {
-            return res.status(500).json({ message: "Server configuration error: Invalid or missing MODEPAY_ACCOUNT_ID." });
-        }
-
         const reference = `DEP_${Date.now()}`;
 
-        // Create pending deposit entry in database (Saving the base deposit amount without fee)
         const newDeposit = new Deposit({
             userPhone: userPhone,
             phone: formattedPhone,
@@ -229,55 +180,96 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
             body: JSON.stringify({
                 account_id: accountId,
                 phone: formattedPhone,
-                amount: totalAmountToPay, // ModePay charges deposit + 15 KES
+                amount: totalAmountToPay,
                 reference: reference,
                 callback_url: `https://${req.get('host')}/api/deposit/callback`
             })
         });
 
         const data = await response.json();
-        console.log("ModePay Response Status:", response.status, JSON.stringify(data));
 
         if (response.ok && (data.success || data.status === "success" || data.ResponseCode === "0")) {
-            return res.json({ success: true, message: `M-Pesa STK Push for ${totalAmountToPay} KES (incl. fee) sent to your phone! Enter your PIN.` });
+            return res.json({ success: true, reference: reference, message: `M-Pesa STK Push sent! Enter PIN.` });
         } else {
             newDeposit.status = "Failed";
             await newDeposit.save();
-            const errMsg = data.message || data.error || data.ResponseDescription || data.msg || "ModePay API request rejected.";
-            return res.status(400).json({ message: errMsg });
+            return res.status(400).json({ message: data.message || "ModePay API request rejected." });
         }
     } catch (err) {
-        console.error("ModePay STK Push Error:", err);
-        res.status(500).json({ message: "Server error triggering STK push prompt." });
+        res.status(500).json({ message: "Server error triggering STK push." });
     }
 });
 
-// Callback Webhook to Credit User Balance & Update Transaction History
+// NEW: Polling Endpoint for Frontend to Check Status
+app.post('/api/deposit/verify', authenticateToken, async (req, res) => {
+    try {
+        const { reference } = req.body;
+        if (!reference) return res.status(400).json({ message: "Reference required." });
+
+        const deposit = await Deposit.findOne({ reference, userPhone: req.user.phone });
+        if (!deposit) return res.status(404).json({ message: "Deposit not found." });
+
+        // If already completed/failed in DB, return immediately
+        if (deposit.status !== "Pending") {
+            const user = await User.findOne({ phone: req.user.phone });
+            return res.json({ status: deposit.status, balance: user.balance });
+        }
+
+        // Poll ModePay for the actual status
+        // *Note: Adjust URL to exact ModePay verify endpoint if different*
+        const response = await fetch("https://modepay.live/api/v1/transaction/status", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-API-Key": MODEPAY_API_KEY,
+                "X-API-Secret": MODEPAY_SECRET_KEY
+            },
+            body: JSON.stringify({ reference: reference })
+        });
+
+        const data = await response.json();
+        const status = (data.status || data.ResultCode || data.resultCode || "").toString().toUpperCase();
+
+        const isSuccess = status === "SUCCESS" || status === "0" || status === "COMPLETED";
+        const isFailed = status === "FAILED" || status === "CANCELLED";
+
+        if (isSuccess) {
+            deposit.status = "Completed";
+            await deposit.save();
+
+            const user = await User.findOne({ phone: deposit.userPhone });
+            user.balance += deposit.amount;
+            await user.save();
+            
+            io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
+            return res.json({ status: "Completed", balance: user.balance });
+        } else if (isFailed) {
+            deposit.status = "Failed";
+            await deposit.save();
+            return res.json({ status: "Failed" });
+        }
+
+        // Still pending
+        return res.json({ status: "Pending" });
+
+    } catch (err) {
+        res.status(500).json({ message: "Verification error." });
+    }
+});
+
+// Fallback Callback Webhook
 app.post('/api/deposit/callback', async (req, res) => {
     try {
         const payload = req.body || {};
-        console.log("📥 ModePay Callback Received:", JSON.stringify(payload));
+        const status = (payload.status || payload.ResultCode || "").toString().toUpperCase();
+        const reference = payload.reference || payload.mpesaReceiptNumber || payload.CheckoutRequestID;
+        const isSuccess = status === "SUCCESS" || status === "0" || status === "COMPLETED";
 
-        const status = (payload.status || payload.ResultCode || payload.resultCode || "").toString().toUpperCase();
-        const reference = payload.reference || payload.mpesaReceiptNumber || payload.MpesaReceiptNumber || payload.CheckoutRequestID;
-
-        // Check for successful payment status
-        const isSuccess = status === "SUCCESS" || status === "0" || status === "COMPLETED" || payload.ResultCode === 0;
-
-        if (!reference) {
-            return res.status(400).json({ message: "No reference provided in callback" });
-        }
+        if (!reference) return res.status(400).json({ message: "No reference provided" });
 
         const depositRecord = await Deposit.findOne({ reference });
-        
-        if (!depositRecord) {
-            console.error(`❌ Deposit record not found for reference: ${reference}`);
-            return res.status(200).json({ ResponseCode: 0, ResponseDesc: "Acknowledged but record not found" });
-        }
-
-        // Only process if status is still Pending to avoid double crediting
-        if (depositRecord.status !== "Pending") {
-            return res.status(200).json({ ResponseCode: 0, ResponseDesc: "Already processed" });
+        if (!depositRecord || depositRecord.status !== "Pending") {
+            return res.status(200).json({ ResponseCode: 0, ResponseDesc: "Acknowledged" });
         }
 
         if (isSuccess) {
@@ -285,68 +277,45 @@ app.post('/api/deposit/callback', async (req, res) => {
             await depositRecord.save();
 
             const user = await User.findOne({ phone: depositRecord.userPhone });
-            
             if (user) {
-                // Credit only the original deposit amount, omitting the 15 KES fee
                 user.balance += depositRecord.amount;
                 await user.save();
-                
-                console.log(`✅ Balance Credited: KES ${depositRecord.amount} to ${user.phone}. New Balance: KES ${user.balance}`);
                 io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
             }
         } else {
-            // Update to Failed if the transaction was rejected/cancelled by user
             depositRecord.status = "Failed";
             await depositRecord.save();
-            console.log(`❌ Deposit Failed for reference: ${reference}`);
         }
-
         res.status(200).json({ ResponseCode: 0, ResponseDesc: "Success" });
     } catch (err) {
-        console.error("Callback processing error:", err);
-        res.status(500).json({ message: "Callback processing failed." });
+        res.status(500).json({ message: "Callback failed." });
     }
 });
 
-// --- DEPOSIT & WITHDRAWAL HISTORY ROUTES ---
-
+// --- HISTORY ROUTES ---
 app.get('/api/deposits', authenticateToken, async (req, res) => {
     try {
         const deposits = await Deposit.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
         const formattedDeposits = deposits.map(d => ({
-            _id: d._id,
-            phone: d.phone,
-            amount: d.amount,
-            status: d.status,
-            reference: d.reference,
+            _id: d._id, amount: d.amount, status: d.status, reference: d.reference,
             timestamp: new Date(d.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
         }));
-
         res.json({ success: true, deposits: formattedDeposits });
-    } catch (err) {
-        res.status(500).json({ message: "Error fetching deposit history." });
-    }
+    } catch (err) { res.status(500).json({ message: "Error fetching deposit history." }); }
 });
 
 app.get('/api/withdrawals', authenticateToken, async (req, res) => {
     try {
         const withdrawals = await Withdrawal.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
         const formattedWithdrawals = withdrawals.map(w => ({
-            _id: w._id,
-            phone: w.phone,
-            amount: w.amount,
-            status: w.status,
+            _id: w._id, amount: w.amount, tax: w.tax, netAmount: w.netAmount, status: w.status,
             timestamp: new Date(w.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })
         }));
-
         res.json({ success: true, withdrawals: formattedWithdrawals });
-    } catch (err) {
-        res.status(500).json({ message: "Error fetching withdrawals." });
-    }
+    } catch (err) { res.status(500).json({ message: "Error fetching withdrawals." }); }
 });
 
-// --- GAME SERVER & SOCKET ENGINE ---
-
+// --- GAME SERVER ENGINE ---
 let gameState = { currentOdd: 1.00, crashPoint: 1.00, isFlying: false };
 let oddsHistory = [1.06, 2.19, 5.51, 1.45, 3.20]; 
 let intervalCount = 0;
@@ -368,9 +337,7 @@ function determineCrashPoint() {
         return parseFloat((targetMinMultiplier + (Math.random() * 5)).toFixed(2));
     }
     if (Math.random() < 0.05) return 1.00;
-
-    const r = Math.random();
-    let crash = 1.01 + (r * r * 18.99); 
+    let crash = 1.01 + (Math.random() * Math.random() * 18.99); 
     if (crash > 20.00) crash = 20.00;
     return parseFloat(crash.toFixed(2));
 }
@@ -379,7 +346,6 @@ function runGameLoop() {
     gameState.crashPoint = determineCrashPoint();
     gameState.currentOdd = 1.00;
     gameState.isFlying = true;
-
     io.emit("takeoff");
 
     const gameInterval = setInterval(() => {
@@ -388,7 +354,6 @@ function runGameLoop() {
             gameState.isFlying = false;
             oddsHistory.push(gameState.crashPoint);
             if (oddsHistory.length > 10) oddsHistory.shift(); 
-
             io.emit("crash", { finalOdd: gameState.crashPoint });
             setTimeout(runGameLoop, 5000); 
         } else {
@@ -397,35 +362,27 @@ function runGameLoop() {
         }
     }, 100);
 }
-
 runGameLoop();
 
-// Chat Bot Messages
-const botMessages = [
-    "Alex: Just cashed out 500 KES! 💸", "Sarah: Waiting for 10x 🚀",
-    "Kevo: Wow, crashed so fast 😭", "Mike: Let's goooo!",
-    "Mwangi: Nice win right there.", "Kasim: cashed out 3500 😜."
-];
-
 setInterval(() => {
-    const randomMsg = botMessages[Math.floor(Math.random() * botMessages.length)];
-    io.emit("chat message", randomMsg);
+    const botMessages = ["Alex: Just cashed out 500 KES! 💸", "Sarah: Waiting for 10x 🚀", "Mwangi: Nice win right there."];
+    io.emit("chat message", botMessages[Math.floor(Math.random() * botMessages.length)]);
 }, 5000); 
 
-// Socket Event Handlers
+// --- SOCKET EVENTS ---
 io.on("connection", (socket) => {
-    socket.emit("sync", {
-        currentOdd: gameState.currentOdd,
-        isFlying: gameState.isFlying,
-        history: oddsHistory
-    });
-
+    socket.emit("sync", { currentOdd: gameState.currentOdd, isFlying: gameState.isFlying, history: oddsHistory });
     socket.on("chat message", (data) => io.emit("chat message", data));
 
+    // UPDATED WITHDRAWAL LOGIC
     socket.on("requestWithdrawal", async (data) => {
         try {
             const { token, phone, amount } = data;
             if (!token) return socket.emit("withdrawalError", { message: "Auth required." });
+
+            if (amount < 4500) {
+                return socket.emit("withdrawalError", { message: "Minimum withdrawal is 4,500 KES." });
+            }
 
             const decoded = jwt.verify(token, JWT_SECRET);
             const user = await User.findOne({ phone: decoded.phone });
@@ -434,19 +391,32 @@ io.on("connection", (socket) => {
                 return socket.emit("withdrawalError", { message: "Insufficient balance." });
             }
 
+            // Calculate 20% Tax
+            const tax = amount * 0.20;
+            const netAmount = amount - tax;
+
+            // Deduct gross amount immediately to prevent double spending
             user.balance -= amount;
             await user.save();
 
-            const withdrawal = new Withdrawal({ userPhone: user.phone, phone, amount, status: "Pending" });
+            const withdrawal = new Withdrawal({ 
+                userPhone: user.phone, 
+                phone, 
+                amount: amount, 
+                tax: tax, 
+                netAmount: netAmount, 
+                status: "Pending" 
+            });
             await withdrawal.save();
 
             socket.emit("withdrawalStatus", {
                 id: withdrawal._id.toString(),
-                phone: withdrawal.phone,
                 amount: withdrawal.amount,
+                tax: withdrawal.tax,
+                netAmount: withdrawal.netAmount,
                 status: withdrawal.status,
-                timestamp: new Date(withdrawal.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' }),
-                newBalance: user.balance
+                newBalance: user.balance,
+                message: `Withdrawal initiated. Net amount of ${netAmount} KES (after ${tax} KES tax) will be processed.`
             });
         } catch (err) {
             socket.emit("withdrawalError", { message: "Server error processing withdrawal." });
@@ -454,9 +424,8 @@ io.on("connection", (socket) => {
     });
 });
 
-// --- SERVER LISTEN ---
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Game Server running on port ${PORT}`);
 });
-    
+          
