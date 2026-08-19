@@ -48,6 +48,7 @@ const depositSchema = new mongoose.Schema({
     phone: { type: String, required: true },
     amount: { type: Number, required: true },
     reference: { type: String, required: true },
+    checkoutRequestId: { type: String }, // Used for ModePay v2 Polling
     status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
 });
@@ -58,6 +59,7 @@ const taxPaymentSchema = new mongoose.Schema({
     phone: { type: String, required: true },
     amount: { type: Number, required: true },
     reference: { type: String, required: true },
+    checkoutRequestId: { type: String }, // Used for ModePay v2 Polling
     status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
 });
@@ -116,6 +118,31 @@ app.get('/api/me', authenticateToken, async (req, res) => {
     res.json(user ? { success: true, user } : { message: "User not found." });
 });
 
+// --- MODEPAY V2 STATUS CHECKER ---
+async function checkModePayStatus(checkoutRequestId) {
+    if (!checkoutRequestId) return "PENDING";
+    try {
+        const response = await fetch(`https://modepay.live/api/v2/status/${checkoutRequestId}`, {
+            headers: { 
+                "X-API-Key": MODEPAY_API_KEY, 
+                "X-API-Secret": MODEPAY_SECRET_KEY 
+            }
+        });
+        
+        if (!response.ok) return "PENDING"; 
+        const data = await response.json();
+        
+        if (data.success && data.data) {
+            const status = (data.data.transaction_status || "").toLowerCase();
+            if (status === "completed") return "SUCCESSFUL";
+            if (status === "failed") return "FAILED";
+        }
+        return "PENDING";
+    } catch (e) {
+        return "PENDING"; 
+    }
+}
+
 // --- DEPOSIT ROUTES ---
 app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     try {
@@ -128,23 +155,27 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         const reference = `DEP_${Date.now()}`;
         const formattedPhone = formatPhoneNumber(req.user.phone);
 
-        // Record ONLY the deposit amount to credit user
+        // Record deposit pending
         const newDeposit = new Deposit({ userPhone: req.user.phone, phone: formattedPhone, amount: depositAmount, reference });
         await newDeposit.save();
 
-        const response = await fetch("https://modepay.live/api/v1/stkpush", {
+        const response = await fetch("https://modepay.live/api/v2/stkpush", {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-API-Key": MODEPAY_API_KEY, "X-API-Secret": MODEPAY_SECRET_KEY },
             body: JSON.stringify({
                 account_id: Number(MODEPAY_ACCOUNT_ID),
                 phone: formattedPhone,
                 amount: totalAmountToPay, 
-                reference: reference
+                reference: reference,
+                description: `Deposit for ${formattedPhone}`
             })
         });
 
         const data = await response.json();
-        if (response.ok && (data.success || data.status === "success" || data.ResponseCode === "0")) {
+        if (response.ok && data.success) {
+            // Save ModePay's checkout_request_id for polling
+            newDeposit.checkoutRequestId = data.data.checkout_request_id;
+            await newDeposit.save();
             return res.json({ success: true, reference, message: `STK Push sent!` });
         } else {
             newDeposit.status = "Failed";
@@ -154,33 +185,13 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Error triggering deposit." }); }
 });
 
-async function checkModePayStatus(reference) {
-    try {
-        const response = await fetch("https://modepay.live/api/v1/transaction/status", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-API-Key": MODEPAY_API_KEY, "X-API-Secret": MODEPAY_SECRET_KEY },
-            body: JSON.stringify({ reference: reference })
-        });
-        if (!response.ok) return "PENDING"; 
-        
-        const data = await response.json();
-        const status = (data.status || data.ResultCode || "").toString().toUpperCase();
-        
-        if (status === "SUCCESS" || status === "COMPLETED" || status === "0") return "SUCCESSFUL";
-        if (status === "FAILED" || status === "CANCELLED") return "FAILED";
-        return "PENDING";
-    } catch (e) {
-        return "PENDING"; 
-    }
-}
-
 app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) => {
     try {
         const deposit = await Deposit.findOne({ reference: req.params.reference });
         if (!deposit) return res.status(404).json({ message: "Transaction not found." });
         if (deposit.status !== "Pending") return res.json({ success: true, status: deposit.status });
 
-        const gatewayStatus = await checkModePayStatus(deposit.reference);
+        const gatewayStatus = await checkModePayStatus(deposit.checkoutRequestId);
 
         if (gatewayStatus === "SUCCESSFUL") {
             deposit.status = "Successful";
@@ -188,7 +199,7 @@ app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) =>
             
             const user = await User.findOne({ phone: deposit.userPhone });
             if (user) {
-                user.balance += deposit.amount; // Add strictly the non-tax amount
+                user.balance += deposit.amount; 
                 await user.save();
                 io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
             }
@@ -225,19 +236,22 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
         const newTax = new TaxPayment({ userPhone: req.user.phone, phone: formattedPhone, amount: taxAmount, reference });
         await newTax.save();
 
-        const response = await fetch("https://modepay.live/api/v1/stkpush", {
+        const response = await fetch("https://modepay.live/api/v2/stkpush", {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-API-Key": MODEPAY_API_KEY, "X-API-Secret": MODEPAY_SECRET_KEY },
             body: JSON.stringify({
                 account_id: Number(MODEPAY_ACCOUNT_ID),
                 phone: formattedPhone,
                 amount: taxAmount,
-                reference: reference
+                reference: reference,
+                description: `Tax payment for withdrawal`
             })
         });
 
         const data = await response.json();
-        if (response.ok && (data.success || data.status === "success" || data.ResponseCode === "0")) {
+        if (response.ok && data.success) {
+            newTax.checkoutRequestId = data.data.checkout_request_id;
+            await newTax.save();
             return res.json({ success: true, reference, taxAmount, message: `Tax payment prompt sent!` });
         } else {
             newTax.status = "Failed";
@@ -253,7 +267,7 @@ app.get('/api/tax/status/:reference', authenticateToken, async (req, res) => {
         if (!tax) return res.status(404).json({ message: "Tax transaction not found." });
         if (tax.status !== "Pending") return res.json({ success: true, status: tax.status });
 
-        const gatewayStatus = await checkModePayStatus(tax.reference);
+        const gatewayStatus = await checkModePayStatus(tax.checkoutRequestId);
 
         if (gatewayStatus === "SUCCESSFUL") {
             tax.status = "Successful";
@@ -283,7 +297,6 @@ app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
         if (amount < 4000) return res.status(400).json({ message: "Minimum withdrawal is 4000 KES." });
         if (!user || user.balance < amount) return res.status(400).json({ message: "Insufficient balance." });
         
-        // At this stage, tax payment has been verified by the frontend
         user.balance -= amount;
         await user.save();
         
@@ -356,4 +369,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-                
+    
