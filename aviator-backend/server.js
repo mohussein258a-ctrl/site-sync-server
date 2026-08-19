@@ -13,7 +13,7 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
 app.set("trust proxy", 1);
-app.use(cors());
+app.use(cors({ origin: "*", methods: ["GET", "POST"] }));
 app.use(express.json());
 
 // --- ENVIRONMENT CONFIGURATION ---
@@ -47,7 +47,7 @@ const depositSchema = new mongoose.Schema({
     userPhone: { type: String, required: true },
     phone: { type: String, required: true },
     amount: { type: Number, required: true },
-    reference: { type: String, required: true },
+    reference: { type: String, required: true, unique: true },
     status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
 });
@@ -57,7 +57,7 @@ const taxPaymentSchema = new mongoose.Schema({
     userPhone: { type: String, required: true },
     phone: { type: String, required: true },
     amount: { type: Number, required: true },
-    reference: { type: String, required: true },
+    reference: { type: String, required: true, unique: true },
     status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
 });
@@ -74,11 +74,96 @@ const Withdrawal = mongoose.model('Withdrawal', withdrawalSchema);
 
 // --- HELPER FUNCTION ---
 function formatPhoneNumber(phone) {
-    let cleaned = phone.replace(/\D/g, '');
+    let cleaned = (phone || "").replace(/\D/g, '');
     if (cleaned.startsWith('0')) cleaned = '254' + cleaned.slice(1);
     else if (cleaned.startsWith('7') || cleaned.startsWith('1')) cleaned = '254' + cleaned;
     return cleaned;
 }
+
+// --- MODEPAY POLLING STATUS CHECKER ---
+async function checkModePayStatus(reference) {
+    try {
+        const response = await fetch("https://modepay.live/api/v1/transaction/status", {
+            method: "POST",
+            headers: { 
+                "Content-Type": "application/json", 
+                "X-API-Key": MODEPAY_API_KEY, 
+                "X-API-Secret": MODEPAY_SECRET_KEY 
+            },
+            body: JSON.stringify({ reference: reference })
+        });
+        
+        if (!response.ok) return "PENDING"; 
+        
+        const data = await response.json();
+        
+        const rawStatus = (
+            data.status || 
+            (data.data && data.data.status) || 
+            data.ResultCode || 
+            (data.data && data.data.ResultCode) || 
+            data.code || 
+            ""
+        ).toString().toUpperCase();
+
+        const successCodes = ["SUCCESS", "SUCCESSFUL", "COMPLETED", "COMPLETE", "0", "PAID"];
+        const failureCodes = ["FAILED", "FAILURE", "CANCELLED", "CANCELED", "DECLINED", "REJECTED", "1", "1032"];
+
+        if (successCodes.includes(rawStatus) || (data.success === true && rawStatus === "COMPLETED")) {
+            return "SUCCESSFUL";
+        }
+        if (failureCodes.includes(rawStatus)) {
+            return "FAILED";
+        }
+        return "PENDING";
+    } catch (e) {
+        console.error(`[ModePay Error] Poll ref: ${reference} -`, e.message);
+        return "PENDING"; 
+    }
+}
+
+// --- BACKGROUND POLLING WORKER ---
+async function pollPendingTransactionsWorker() {
+    try {
+        const pendingDeposits = await Deposit.find({ status: "Pending" }).limit(15);
+        for (const dep of pendingDeposits) {
+            const gatewayStatus = await checkModePayStatus(dep.reference);
+            if (gatewayStatus === "SUCCESSFUL") {
+                const updatedDep = await Deposit.findOneAndUpdate(
+                    { _id: dep._id, status: "Pending" },
+                    { status: "Successful" },
+                    { new: true }
+                );
+                if (updatedDep) {
+                    await User.updateOne({ phone: updatedDep.userPhone }, { $inc: { balance: updatedDep.amount } });
+                    const user = await User.findOne({ phone: updatedDep.userPhone });
+                    if (user) {
+                        io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
+                    }
+                    console.log(`✅ [Auto-Polled] Deposit credited: ${dep.amount} KES to ${dep.userPhone}`);
+                }
+            } else if (gatewayStatus === "FAILED") {
+                await Deposit.updateOne({ _id: dep._id, status: "Pending" }, { status: "Failed" });
+                console.log(`❌ [Auto-Polled] Deposit failed: ${dep.reference}`);
+            }
+        }
+
+        const pendingTaxes = await TaxPayment.find({ status: "Pending" }).limit(15);
+        for (const tax of pendingTaxes) {
+            const gatewayStatus = await checkModePayStatus(tax.reference);
+            if (gatewayStatus === "SUCCESSFUL") {
+                await TaxPayment.updateOne({ _id: tax._id, status: "Pending" }, { status: "Successful" });
+                console.log(`✅ [Auto-Polled] Tax payment confirmed: ${tax.reference}`);
+            } else if (gatewayStatus === "FAILED") {
+                await TaxPayment.updateOne({ _id: tax._id, status: "Pending" }, { status: "Failed" });
+                console.log(`❌ [Auto-Polled] Tax payment failed: ${tax.reference}`);
+            }
+        }
+    } catch (err) {
+        console.error("Worker Error:", err.message);
+    }
+}
+setInterval(pollPendingTransactionsWorker, 8000);
 
 // --- AUTH MIDDLEWARE ---
 const authenticateToken = (req, res, next) => {
@@ -96,24 +181,37 @@ const authenticateToken = (req, res, next) => {
 app.post('/api/register', async (req, res) => {
     try {
         const { phone, password, name } = req.body;
+        if (!phone || !password || !name) return res.status(400).json({ message: "All fields required." });
         if (await User.findOne({ phone })) return res.status(400).json({ message: "Phone registered." });
+        
         const newUser = new User({ phone, password: await bcrypt.hash(password, 10), userName: name });
         await newUser.save();
-        res.status(201).json({ success: true, token: jwt.sign({ userId: newUser._id, phone: newUser.phone }, JWT_SECRET, { expiresIn: '7d' }), user: newUser });
+        
+        res.status(201).json({ 
+            success: true, 
+            token: jwt.sign({ userId: newUser._id, phone: newUser.phone }, JWT_SECRET, { expiresIn: '7d' }), 
+            user: { _id: newUser._id, name: newUser.userName, phone: newUser.phone, balance: newUser.balance } 
+        });
     } catch (err) { res.status(500).json({ message: "Server error." }); }
 });
 
 app.post('/api/login', async (req, res) => {
     try {
         const user = await User.findOne({ phone: req.body.phone });
-        if (!user || !(await bcrypt.compare(req.body.password, user.password))) return res.status(400).json({ message: "Invalid credentials." });
-        res.json({ success: true, token: jwt.sign({ userId: user._id, phone: user.phone }, JWT_SECRET, { expiresIn: '7d' }), user });
+        if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
+            return res.status(400).json({ message: "Invalid credentials." });
+        }
+        res.json({ 
+            success: true, 
+            token: jwt.sign({ userId: user._id, phone: user.phone }, JWT_SECRET, { expiresIn: '7d' }), 
+            user: { _id: user._id, name: user.userName, phone: user.phone, balance: user.balance } 
+        });
     } catch (err) { res.status(500).json({ message: "Server error." }); }
 });
 
 app.get('/api/me', authenticateToken, async (req, res) => {
     const user = await User.findById(req.user.userId);
-    res.json(user ? { success: true, user } : { message: "User not found." });
+    res.json(user ? { success: true, user: { _id: user._id, name: user.userName, phone: user.phone, balance: user.balance } } : { message: "User not found." });
 });
 
 // --- DEPOSIT ROUTES ---
@@ -128,7 +226,6 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         const reference = `DEP_${Date.now()}`;
         const formattedPhone = formatPhoneNumber(req.user.phone);
 
-        // Record ONLY the deposit amount to credit user
         const newDeposit = new Deposit({ userPhone: req.user.phone, phone: formattedPhone, amount: depositAmount, reference });
         await newDeposit.save();
 
@@ -145,7 +242,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
 
         const data = await response.json();
         if (response.ok && (data.success || data.status === "success" || data.ResponseCode === "0")) {
-            return res.json({ success: true, reference, message: `STK Push sent!` });
+            return res.json({ success: true, reference, message: "STK Push sent!" });
         } else {
             newDeposit.status = "Failed";
             await newDeposit.save();
@@ -154,50 +251,34 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Error triggering deposit." }); }
 });
 
-async function checkModePayStatus(reference) {
-    try {
-        const response = await fetch("https://modepay.live/api/v1/transaction/status", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-API-Key": MODEPAY_API_KEY, "X-API-Secret": MODEPAY_SECRET_KEY },
-            body: JSON.stringify({ reference: reference })
-        });
-        if (!response.ok) return "PENDING"; 
-        
-        const data = await response.json();
-        const status = (data.status || data.ResultCode || "").toString().toUpperCase();
-        
-        if (status === "SUCCESS" || status === "COMPLETED" || status === "0") return "SUCCESSFUL";
-        if (status === "FAILED" || status === "CANCELLED") return "FAILED";
-        return "PENDING";
-    } catch (e) {
-        return "PENDING"; 
-    }
-}
-
 app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) => {
     try {
-        const deposit = await Deposit.findOne({ reference: req.params.reference });
+        let deposit = await Deposit.findOne({ reference: req.params.reference });
         if (!deposit) return res.status(404).json({ message: "Transaction not found." });
         if (deposit.status !== "Pending") return res.json({ success: true, status: deposit.status });
 
         const gatewayStatus = await checkModePayStatus(deposit.reference);
 
         if (gatewayStatus === "SUCCESSFUL") {
-            deposit.status = "Successful";
-            await deposit.save();
-            
-            const user = await User.findOne({ phone: deposit.userPhone });
-            if (user) {
-                user.balance += deposit.amount; // Add strictly the non-tax amount
-                await user.save();
-                io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
+            const updatedDep = await Deposit.findOneAndUpdate(
+                { _id: deposit._id, status: "Pending" },
+                { status: "Successful" },
+                { new: true }
+            );
+            if (updatedDep) {
+                await User.updateOne({ phone: updatedDep.userPhone }, { $inc: { balance: updatedDep.amount } });
+                const user = await User.findOne({ phone: updatedDep.userPhone });
+                if (user) {
+                    io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
+                }
+                return res.json({ success: true, status: "Successful" });
             }
         } else if (gatewayStatus === "FAILED") {
-            deposit.status = "Failed";
-            await deposit.save();
+            await Deposit.updateOne({ _id: deposit._id, status: "Pending" }, { status: "Failed" });
+            return res.json({ success: true, status: "Failed" });
         }
 
-        res.json({ success: true, status: deposit.status });
+        res.json({ success: true, status: "Pending" });
     } catch (err) { res.status(500).json({ message: "Error checking status." }); }
 });
 
@@ -205,9 +286,7 @@ app.get('/api/deposits/history', authenticateToken, async (req, res) => {
     try {
         const deposits = await Deposit.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
         res.json({ success: true, deposits });
-    } catch (err) {
-        res.status(500).json({ message: "Error fetching deposit history." });
-    }
+    } catch (err) { res.status(500).json({ message: "Error fetching deposit history." }); }
 });
 
 // --- WITHDRAWAL TAX ROUTES ---
@@ -238,7 +317,7 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
 
         const data = await response.json();
         if (response.ok && (data.success || data.status === "success" || data.ResponseCode === "0")) {
-            return res.json({ success: true, reference, taxAmount, message: `Tax payment prompt sent!` });
+            return res.json({ success: true, reference, taxAmount, message: "Tax payment prompt sent!" });
         } else {
             newTax.status = "Failed";
             await newTax.save();
@@ -249,21 +328,21 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
 
 app.get('/api/tax/status/:reference', authenticateToken, async (req, res) => {
     try {
-        const tax = await TaxPayment.findOne({ reference: req.params.reference });
+        let tax = await TaxPayment.findOne({ reference: req.params.reference });
         if (!tax) return res.status(404).json({ message: "Tax transaction not found." });
         if (tax.status !== "Pending") return res.json({ success: true, status: tax.status });
 
         const gatewayStatus = await checkModePayStatus(tax.reference);
 
         if (gatewayStatus === "SUCCESSFUL") {
-            tax.status = "Successful";
-            await tax.save();
+            await TaxPayment.updateOne({ _id: tax._id, status: "Pending" }, { status: "Successful" });
+            return res.json({ success: true, status: "Successful" });
         } else if (gatewayStatus === "FAILED") {
-            tax.status = "Failed";
-            await tax.save();
+            await TaxPayment.updateOne({ _id: tax._id, status: "Pending" }, { status: "Failed" });
+            return res.json({ success: true, status: "Failed" });
         }
 
-        res.json({ success: true, status: tax.status });
+        res.json({ success: true, status: "Pending" });
     } catch (err) { res.status(500).json({ message: "Error checking tax status." }); }
 });
 
@@ -283,12 +362,13 @@ app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
         if (amount < 4000) return res.status(400).json({ message: "Minimum withdrawal is 4000 KES." });
         if (!user || user.balance < amount) return res.status(400).json({ message: "Insufficient balance." });
         
-        // At this stage, tax payment has been verified by the frontend
         user.balance -= amount;
         await user.save();
         
         const withdrawal = new Withdrawal({ userPhone: user.phone, phone: user.phone, amount, status: "Pending" });
         await withdrawal.save();
+        
+        io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
         
         res.json({ success: true, message: "Withdrawal request received.", newBalance: user.balance });
     } catch (err) {
@@ -300,9 +380,7 @@ app.get('/api/withdrawals/history', authenticateToken, async (req, res) => {
     try {
         const withdrawals = await Withdrawal.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
         res.json({ success: true, withdrawals });
-    } catch (err) {
-        res.status(500).json({ message: "Error fetching withdrawal history." });
-    }
+    } catch (err) { res.status(500).json({ message: "Error fetching withdrawal history." }); }
 });
 
 // --- GAME SERVER & SOCKET ENGINE ---
@@ -356,4 +434,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-                            
+            
