@@ -358,7 +358,35 @@ app.get('/api/withdrawals/history', authenticateToken, async (req, res) => {
 let gameState = { currentOdd: 1.00, crashPoint: 1.00, isFlying: false };
 let oddsHistory = [1.06, 2.19, 5.51, 1.45, 3.20]; 
 
+// --- RESTORED INTERVAL LOGIC ---
+let intervalCount = 0;
+let forcedRoundsRemaining = 0;
+let targetMinMultiplier = 1.00;
+
+setInterval(() => {
+    intervalCount++;
+    if (intervalCount > 3) intervalCount = 1;
+
+    if (intervalCount === 1) {
+        forcedRoundsRemaining = 2;
+        targetMinMultiplier = 90.00; 
+    }
+    else if (intervalCount === 2) {
+        forcedRoundsRemaining = 4;
+        targetMinMultiplier = 30.00; 
+    }
+    else if (intervalCount === 3) {
+        forcedRoundsRemaining = 3;
+        targetMinMultiplier = 60.00; 
+    }
+}, 1200000);
+
+// --- RESTORED MULTIPLIER LOGIC ---
 function determineCrashPoint() {
+    if (forcedRoundsRemaining > 0) {
+        forcedRoundsRemaining--;
+        return parseFloat((targetMinMultiplier + (Math.random() * 5)).toFixed(2));
+    }
     if (Math.random() < 0.05) return 1.00;
     let crash = 1.01 + (Math.random() * Math.random() * 18.99); 
     return parseFloat(Math.min(crash, 20.00).toFixed(2));
@@ -387,15 +415,18 @@ function runGameLoop() {
 runGameLoop();
 
 const botMessages = [
-    "Alex: Just cashed out 500 KES! 💸", "Sarah: Waiting for 10x 🚀",
+    "Alex: Just cashed out 500 KES! 💸", "Sarah: Waiting for 90x 🚀",
     "Kevo: Wow, crashed so fast 😭", "Mike: Let's goooo!",
-    "Mwangi: Nice win right there.", "Kasim: cashed out 3500 😜."
+    "Mwangi: Nice win right there.", "Kasim: cashed out 3500 😜.",
+    "Walalka: Kusota imeisha wallahi 😂." ,"Dor: Don't just wait for signals.",
+    "sharon: Pesa zimeingia 🎉." , "Mwendee: Huu mwaka lazima nitoboe 💯." ,
+    "Vindee: Leo ni leo 😂." , "Stacy: Bag ni ya pesa 💰."
 ];
 
 setInterval(() => {
     const randomMsg = botMessages[Math.floor(Math.random() * botMessages.length)];
     io.emit("chat message", randomMsg);
-}, 5000); 
+}, 8000); 
 
 io.on("connection", (socket) => {
     socket.emit("sync", { currentOdd: gameState.currentOdd, isFlying: gameState.isFlying, history: oddsHistory });
@@ -405,4 +436,3 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-        
