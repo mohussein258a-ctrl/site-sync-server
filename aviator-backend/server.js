@@ -61,6 +61,7 @@ const taxPaymentSchema = new mongoose.Schema({
     reference: { type: String, required: true },
     checkoutRequestId: { type: String }, // Used for ModePay v2 Polling
     status: { type: String, default: "Pending" },
+    isUsed: { type: Boolean, default: false }, // NEW: Prevents reusing a single tax payment
     createdAt: { type: Date, default: Date.now }
 });
 const TaxPayment = mongoose.model('TaxPayment', taxPaymentSchema);
@@ -288,6 +289,25 @@ app.get('/api/tax/history', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Error fetching tax history." }); }
 });
 
+// --- NEW: TAX VERIFICATION ENDPOINT ---
+app.get('/api/verify-tax-status', authenticateToken, async (req, res) => {
+    try {
+        const successfulTax = await TaxPayment.findOne({
+            userPhone: req.user.phone,
+            status: "Successful",
+            isUsed: false
+        });
+        
+        if (successfulTax) {
+            res.json({ taxPaid: true });
+        } else {
+            res.json({ taxPaid: false });
+        }
+    } catch (err) {
+        res.status(500).json({ message: "Server error checking tax status." });
+    }
+});
+
 // --- HTTP WITHDRAWAL PROCESSING ---
 app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
     try {
@@ -296,6 +316,22 @@ app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
         
         if (amount < 4000) return res.status(400).json({ message: "Minimum withdrawal is 4000 KES." });
         if (!user || user.balance < amount) return res.status(400).json({ message: "Insufficient balance." });
+        
+        // --- NEW: Backend Tax Enforcement ---
+        const successfulTax = await TaxPayment.findOne({
+            userPhone: req.user.phone,
+            status: "Successful",
+            isUsed: false
+        });
+
+        if (!successfulTax) {
+            return res.status(400).json({ message: "Upfront tax must be paid before withdrawal." });
+        }
+
+        // Mark the tax payment as used so it cannot be applied to future withdrawals
+        successfulTax.isUsed = true;
+        await successfulTax.save();
+        // ------------------------------------
         
         user.balance -= amount;
         await user.save();
@@ -369,4 +405,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-    
+        
