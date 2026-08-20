@@ -119,6 +119,29 @@ app.get('/api/me', authenticateToken, async (req, res) => {
     res.json(user ? { success: true, user } : { message: "User not found." });
 });
 
+// --- BET AND BALANCE SYNC ROUTES ---
+app.post('/api/user/bet', authenticateToken, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.userId);
+        const amount = Number(req.body.amount);
+        if (!user || user.balance < amount) return res.status(400).json({ message: "Insufficient balance." });
+        user.balance -= amount;
+        await user.save();
+        res.json({ success: true, balance: user.balance });
+    } catch (err) { res.status(500).json({ message: "Server error." }); }
+});
+
+app.post('/api/user/win', authenticateToken, async (req, res) => {
+    try {
+        const user = await User.findById(req.user.userId);
+        const amount = Number(req.body.amount);
+        if (!user) return res.status(404).json({ message: "User not found." });
+        user.balance += amount;
+        await user.save();
+        res.json({ success: true, balance: user.balance });
+    } catch (err) { res.status(500).json({ message: "Server error." }); }
+});
+
 // --- MODEPAY V2 STATUS CHECKER ---
 async function checkModePayStatus(checkoutRequestId) {
     if (!checkoutRequestId) return "PENDING";
@@ -156,7 +179,6 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         const reference = `DEP_${Date.now()}`;
         const formattedPhone = formatPhoneNumber(req.user.phone);
 
-        // Record deposit pending
         const newDeposit = new Deposit({ userPhone: req.user.phone, phone: formattedPhone, amount: depositAmount, reference });
         await newDeposit.save();
 
@@ -174,7 +196,6 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
 
         const data = await response.json();
         if (response.ok && data.success) {
-            // Save ModePay's checkout_request_id for polling
             newDeposit.checkoutRequestId = data.data.checkout_request_id;
             await newDeposit.save();
             return res.json({ success: true, reference, message: `STK Push sent!` });
@@ -289,7 +310,6 @@ app.get('/api/tax/history', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Error fetching tax history." }); }
 });
 
-// --- NEW: TAX VERIFICATION ENDPOINT ---
 app.get('/api/verify-tax-status', authenticateToken, async (req, res) => {
     try {
         const successfulTax = await TaxPayment.findOne({
@@ -317,7 +337,6 @@ app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
         if (amount < 4000) return res.status(400).json({ message: "Minimum withdrawal is 4000 KES." });
         if (!user || user.balance < amount) return res.status(400).json({ message: "Insufficient balance." });
         
-        // --- NEW: Backend Tax Enforcement ---
         const successfulTax = await TaxPayment.findOne({
             userPhone: req.user.phone,
             status: "Successful",
@@ -328,10 +347,8 @@ app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
             return res.status(400).json({ message: "Upfront tax must be paid before withdrawal." });
         }
 
-        // Mark the tax payment as used so it cannot be applied to future withdrawals
         successfulTax.isUsed = true;
         await successfulTax.save();
-        // ------------------------------------
         
         user.balance -= amount;
         await user.save();
@@ -358,7 +375,7 @@ app.get('/api/withdrawals/history', authenticateToken, async (req, res) => {
 let gameState = { currentOdd: 1.00, crashPoint: 1.00, isFlying: false };
 let oddsHistory = [1.06, 2.19, 5.51, 1.45, 3.20]; 
 
-// --- RESTORED INTERVAL LOGIC ---
+// --- 20-MIN INTERVAL LOGIC ---
 let intervalCount = 0;
 let forcedRoundsRemaining = 0;
 let targetMinMultiplier = 1.00;
@@ -381,14 +398,30 @@ setInterval(() => {
     }
 }, 1200000);
 
-// --- RESTORED MULTIPLIER LOGIC ---
+// --- UPDATED UNPREDICTABLE CRASH LOGIC ---
 function determineCrashPoint() {
+    // Leave the guaranteed high intervals alone
     if (forcedRoundsRemaining > 0) {
         forcedRoundsRemaining--;
         return parseFloat((targetMinMultiplier + (Math.random() * 5)).toFixed(2));
     }
-    if (Math.random() < 0.05) return 1.00;
-    let crash = 1.01 + (Math.random() * Math.random() * 18.99); 
+
+    // Unpredictable standard play: heavily skewed to lower digits
+    let r = Math.random();
+    let crash;
+    
+    if (r < 0.08) {
+        crash = 1.00; // 8% chance of immediate crash
+    } else if (r < 0.60) {
+        crash = 1.01 + (Math.random() * 1.49); // 52% chance between 1.01x and 2.50x
+    } else if (r < 0.85) {
+        crash = 2.50 + (Math.random() * 2.50); // 25% chance between 2.50x and 5.00x
+    } else if (r < 0.96) {
+        crash = 5.00 + (Math.random() * 5.00); // 11% chance between 5.00x and 10.00x
+    } else {
+        crash = 10.00 + (Math.random() * 10.00); // 4% chance between 10.00x and 20.00x
+    }
+
     return parseFloat(Math.min(crash, 20.00).toFixed(2));
 }
 
@@ -436,3 +469,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
+    
