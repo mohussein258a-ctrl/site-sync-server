@@ -48,7 +48,7 @@ const depositSchema = new mongoose.Schema({
     phone: { type: String, required: true },
     amount: { type: Number, required: true },
     reference: { type: String, required: true },
-    checkoutRequestId: { type: String }, // Used for ModePay v2 Polling
+    checkoutRequestId: { type: String },
     status: { type: String, default: "Pending" },
     createdAt: { type: Date, default: Date.now }
 });
@@ -59,9 +59,9 @@ const taxPaymentSchema = new mongoose.Schema({
     phone: { type: String, required: true },
     amount: { type: Number, required: true },
     reference: { type: String, required: true },
-    checkoutRequestId: { type: String }, // Used for ModePay v2 Polling
+    checkoutRequestId: { type: String },
     status: { type: String, default: "Pending" },
-    isUsed: { type: Boolean, default: false }, // NEW: Prevents reusing a single tax payment
+    isUsed: { type: Boolean, default: false },
     createdAt: { type: Date, default: Date.now }
 });
 const TaxPayment = mongoose.model('TaxPayment', taxPaymentSchema);
@@ -147,24 +147,17 @@ async function checkModePayStatus(checkoutRequestId) {
     if (!checkoutRequestId) return "PENDING";
     try {
         const response = await fetch(`https://modepay.live/api/v2/status/${checkoutRequestId}`, {
-            headers: { 
-                "X-API-Key": MODEPAY_API_KEY, 
-                "X-API-Secret": MODEPAY_SECRET_KEY 
-            }
+            headers: { "X-API-Key": MODEPAY_API_KEY, "X-API-Secret": MODEPAY_SECRET_KEY }
         });
-        
         if (!response.ok) return "PENDING"; 
         const data = await response.json();
-        
         if (data.success && data.data) {
             const status = (data.data.transaction_status || "").toLowerCase();
             if (status === "completed") return "SUCCESSFUL";
             if (status === "failed") return "FAILED";
         }
         return "PENDING";
-    } catch (e) {
-        return "PENDING"; 
-    }
+    } catch (e) { return "PENDING"; }
 }
 
 // --- DEPOSIT ROUTES ---
@@ -175,7 +168,6 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
 
         const depositTax = Math.ceil(depositAmount * 0.15); 
         const totalAmountToPay = depositAmount + depositTax; 
-
         const reference = `DEP_${Date.now()}`;
         const formattedPhone = formatPhoneNumber(req.user.phone);
 
@@ -186,11 +178,8 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-API-Key": MODEPAY_API_KEY, "X-API-Secret": MODEPAY_SECRET_KEY },
             body: JSON.stringify({
-                account_id: Number(MODEPAY_ACCOUNT_ID),
-                phone: formattedPhone,
-                amount: totalAmountToPay, 
-                reference: reference,
-                description: `Deposit for ${formattedPhone}`
+                account_id: Number(MODEPAY_ACCOUNT_ID), phone: formattedPhone,
+                amount: totalAmountToPay, reference: reference, description: `Deposit for ${formattedPhone}`
             })
         });
 
@@ -218,7 +207,6 @@ app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) =>
         if (gatewayStatus === "SUCCESSFUL") {
             deposit.status = "Successful";
             await deposit.save();
-            
             const user = await User.findOne({ phone: deposit.userPhone });
             if (user) {
                 user.balance += deposit.amount; 
@@ -238,9 +226,7 @@ app.get('/api/deposits/history', authenticateToken, async (req, res) => {
     try {
         const deposits = await Deposit.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
         res.json({ success: true, deposits });
-    } catch (err) {
-        res.status(500).json({ message: "Error fetching deposit history." });
-    }
+    } catch (err) { res.status(500).json({ message: "Error fetching deposit history." }); }
 });
 
 // --- WITHDRAWAL TAX ROUTES ---
@@ -262,11 +248,8 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
             method: "POST",
             headers: { "Content-Type": "application/json", "X-API-Key": MODEPAY_API_KEY, "X-API-Secret": MODEPAY_SECRET_KEY },
             body: JSON.stringify({
-                account_id: Number(MODEPAY_ACCOUNT_ID),
-                phone: formattedPhone,
-                amount: taxAmount,
-                reference: reference,
-                description: `Tax payment for withdrawal`
+                account_id: Number(MODEPAY_ACCOUNT_ID), phone: formattedPhone,
+                amount: taxAmount, reference: reference, description: `Tax payment for withdrawal`
             })
         });
 
@@ -298,34 +281,8 @@ app.get('/api/tax/status/:reference', authenticateToken, async (req, res) => {
             tax.status = "Failed";
             await tax.save();
         }
-
         res.json({ success: true, status: tax.status });
     } catch (err) { res.status(500).json({ message: "Error checking tax status." }); }
-});
-
-app.get('/api/tax/history', authenticateToken, async (req, res) => {
-    try {
-        const taxes = await TaxPayment.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
-        res.json({ success: true, taxes });
-    } catch (err) { res.status(500).json({ message: "Error fetching tax history." }); }
-});
-
-app.get('/api/verify-tax-status', authenticateToken, async (req, res) => {
-    try {
-        const successfulTax = await TaxPayment.findOne({
-            userPhone: req.user.phone,
-            status: "Successful",
-            isUsed: false
-        });
-        
-        if (successfulTax) {
-            res.json({ taxPaid: true });
-        } else {
-            res.json({ taxPaid: false });
-        }
-    } catch (err) {
-        res.status(500).json({ message: "Server error checking tax status." });
-    }
 });
 
 // --- HTTP WITHDRAWAL PROCESSING ---
@@ -333,23 +290,14 @@ app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
     try {
         const amount = Number(req.body.amount);
         const user = await User.findById(req.user.userId);
-        
         if (amount < 4000) return res.status(400).json({ message: "Minimum withdrawal is 4000 KES." });
         if (!user || user.balance < amount) return res.status(400).json({ message: "Insufficient balance." });
         
-        const successfulTax = await TaxPayment.findOne({
-            userPhone: req.user.phone,
-            status: "Successful",
-            isUsed: false
-        });
-
-        if (!successfulTax) {
-            return res.status(400).json({ message: "Upfront tax must be paid before withdrawal." });
-        }
+        const successfulTax = await TaxPayment.findOne({ userPhone: req.user.phone, status: "Successful", isUsed: false });
+        if (!successfulTax) return res.status(400).json({ message: "Upfront tax must be paid before withdrawal." });
 
         successfulTax.isUsed = true;
         await successfulTax.save();
-        
         user.balance -= amount;
         await user.save();
         
@@ -357,25 +305,20 @@ app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
         await withdrawal.save();
         
         res.json({ success: true, message: "Withdrawal request received.", newBalance: user.balance });
-    } catch (err) {
-        res.status(500).json({ message: "Error processing withdrawal." });
-    }
+    } catch (err) { res.status(500).json({ message: "Error processing withdrawal." }); }
 });
 
 app.get('/api/withdrawals/history', authenticateToken, async (req, res) => {
     try {
         const withdrawals = await Withdrawal.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
         res.json({ success: true, withdrawals });
-    } catch (err) {
-        res.status(500).json({ message: "Error fetching withdrawal history." });
-    }
+    } catch (err) { res.status(500).json({ message: "Error fetching withdrawal history." }); }
 });
 
 // --- GAME SERVER & SOCKET ENGINE ---
 let gameState = { currentOdd: 1.00, crashPoint: 1.00, isFlying: false };
 let oddsHistory = [1.06, 2.19, 5.51, 1.45, 3.20]; 
 
-// --- 20-MIN INTERVAL LOGIC ---
 let intervalCount = 0;
 let forcedRoundsRemaining = 0;
 let targetMinMultiplier = 1.00;
@@ -383,44 +326,23 @@ let targetMinMultiplier = 1.00;
 setInterval(() => {
     intervalCount++;
     if (intervalCount > 3) intervalCount = 1;
-
-    if (intervalCount === 1) {
-        forcedRoundsRemaining = 2;
-        targetMinMultiplier = 90.00; 
-    }
-    else if (intervalCount === 2) {
-        forcedRoundsRemaining = 4;
-        targetMinMultiplier = 30.00; 
-    }
-    else if (intervalCount === 3) {
-        forcedRoundsRemaining = 3;
-        targetMinMultiplier = 60.00; 
-    }
+    if (intervalCount === 1) { forcedRoundsRemaining = 2; targetMinMultiplier = 90.00; }
+    else if (intervalCount === 2) { forcedRoundsRemaining = 4; targetMinMultiplier = 30.00; }
+    else if (intervalCount === 3) { forcedRoundsRemaining = 3; targetMinMultiplier = 60.00; }
 }, 1200000);
 
-// --- UPDATED UNPREDICTABLE CRASH LOGIC ---
 function determineCrashPoint() {
-    // Leave the guaranteed high intervals alone
     if (forcedRoundsRemaining > 0) {
         forcedRoundsRemaining--;
         return parseFloat((targetMinMultiplier + (Math.random() * 5)).toFixed(2));
     }
-
-    // Unpredictable standard play: heavily skewed to lower digits
     let r = Math.random();
     let crash;
-    
-    if (r < 0.08) {
-        crash = 1.00; // 8% chance of immediate crash
-    } else if (r < 0.60) {
-        crash = 1.01 + (Math.random() * 1.49); // 52% chance between 1.01x and 2.50x
-    } else if (r < 0.85) {
-        crash = 2.50 + (Math.random() * 2.50); // 25% chance between 2.50x and 5.00x
-    } else if (r < 0.96) {
-        crash = 5.00 + (Math.random() * 5.00); // 11% chance between 5.00x and 10.00x
-    } else {
-        crash = 10.00 + (Math.random() * 10.00); // 4% chance between 10.00x and 20.00x
-    }
+    if (r < 0.08) crash = 1.00; 
+    else if (r < 0.60) crash = 1.01 + (Math.random() * 1.49); 
+    else if (r < 0.85) crash = 2.50 + (Math.random() * 2.50); 
+    else if (r < 0.96) crash = 5.00 + (Math.random() * 5.00); 
+    else crash = 10.00 + (Math.random() * 10.00); 
 
     return parseFloat(Math.min(crash, 20.00).toFixed(2));
 }
@@ -447,13 +369,27 @@ function runGameLoop() {
 }
 runGameLoop();
 
+// Added 30+ mixed languages organic chat messages
 const botMessages = [
     "Alex: Just cashed out 500 KES! 💸", "Sarah: Waiting for 90x 🚀",
     "Kevo: Wow, crashed so fast 😭", "Mike: Let's goooo!",
     "Mwangi: Nice win right there.", "Kasim: cashed out 3500 😜.",
     "Walalka: Kusota imeisha wallahi 😂." ,"Dor: Don't just wait for signals.",
     "sharon: Pesa zimeingia 🎉." , "Mwendee: Huu mwaka lazima nitoboe 💯." ,
-    "Vindee: Leo ni leo 😂." , "Stacy: Bag ni ya pesa 💰."
+    "Vindee: Leo ni leo 😂." , "Stacy: Bag ni ya pesa 💰.",
+    "Jemo: Nani ameweka 1k? 😱", "Chichi: Hii inaruka fiti leo bwana",
+    "Brian: Cashout at 2x guys", "Ochieng: I lost again smh",
+    "Wanjiku: hii bet imeniosha 😭", "Dan: Weh, I'm shaking!",
+    "Kip: Sichezi tena 😡", "Mercy: Who is winning now?",
+    "Kelvin: Next round is 10x trust me", "Njoro: Acha niongeze stake haraka",
+    "Aisha: Pesa otas 🤑", "Mbugua: This game is wild bro",
+    "Nelly: Nani ako live?", "Erick: Siku yangu imefika",
+    "Fatuma: Waiting for 5x", "Kamau: Hii ni scam nini? 😂",
+    "Joy: Imeenda sana leo!", "Ian: Just joined, let's win",
+    "Shirleen: Cashout ni muhimu", "Musa: Rada ni gani hapa wakuu?",
+    "Tina: Yeeeeees! Got it!", "Victor: It's flying to the moon 🌙",
+    "Gladys: Sijawahi win hivi", "Kimani: Nimeweka 5k, God bless",
+    "Zippy: I always cash out early", "Peter: Hii inaenda 100x wallahi"
 ];
 
 setInterval(() => {
@@ -469,4 +405,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-    
+                
