@@ -325,17 +325,28 @@ let targetMinMultiplier = 1.00;
 
 setInterval(() => {
     intervalCount++;
-    if (intervalCount > 3) intervalCount = 1;
+    // Extended the loop to reset after the 6th interval (120 minutes total)
+    if (intervalCount > 6) intervalCount = 1; 
+
+    // Original Phases
     if (intervalCount === 1) { forcedRoundsRemaining = 2; targetMinMultiplier = 90.00; }
     else if (intervalCount === 2) { forcedRoundsRemaining = 4; targetMinMultiplier = 30.00; }
     else if (intervalCount === 3) { forcedRoundsRemaining = 3; targetMinMultiplier = 60.00; }
+    
+    // New Phases Added
+    else if (intervalCount === 4) { forcedRoundsRemaining = 2; targetMinMultiplier = 40.00; } // Minute 80
+    else if (intervalCount === 5) { forcedRoundsRemaining = 5; targetMinMultiplier = 20.00; } // Minute 100
+    else if (intervalCount === 6) { forcedRoundsRemaining = 1; targetMinMultiplier = 100.00; } // Minute 120
 }, 1200000);
 
 function determineCrashPoint() {
     if (forcedRoundsRemaining > 0) {
         forcedRoundsRemaining--;
+        // Note: The + (Math.random() * 5) still applies to your new intervals, 
+        // meaning your 100x1 will crash somewhere between 100.00 and 105.00
         return parseFloat((targetMinMultiplier + (Math.random() * 5)).toFixed(2));
     }
+    
     let r = Math.random();
     let crash;
     if (r < 0.08) crash = 1.00; 
