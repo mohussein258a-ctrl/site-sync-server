@@ -20,12 +20,13 @@ app.use(express.json());
 const JWT_SECRET = process.env.JWT_SECRET || "pilot_hamoody_secret_key_2026";
 const MONGODB_URI = process.env.MONGODB_URI;
 
-const MODEPAY_API_KEY = (process.env.MODEPAY_API_KEY || "").replace(/['"]/g, "").trim();
-const MODEPAY_SECRET_KEY = (process.env.MODEPAY_SECRET_KEY || "").replace(/['"]/g, "").trim();
-const MODEPAY_ACCOUNT_ID = (process.env.MODEPAY_ACCOUNT_ID || "").replace(/['"]/g, "").trim();
+// PAYHERO API CONFIGURATION
+const PAYHERO_API_KEY = (process.env.PAYHERO_API_KEY || "").replace(/['"]/g, "").trim();
+const PAYHERO_CHANNEL_ID = (process.env.PAYHERO_CHANNEL_ID || "").replace(/['"]/g, "").trim();
+const CALLBACK_BASE_URL = (process.env.CALLBACK_BASE_URL || "https://your-domain.com").replace(/\/$/, "");
 
 if (!MONGODB_URI) console.warn("⚠️ MONGODB_URI is not defined.");
-if (!MODEPAY_API_KEY || !MODEPAY_SECRET_KEY) console.warn("⚠️ ModePay API keys missing.");
+if (!PAYHERO_API_KEY || !PAYHERO_CHANNEL_ID) console.warn("⚠️ PayHero API configurations missing.");
 
 // --- MONGODB CONNECTION ---
 if (MONGODB_URI) {
@@ -142,25 +143,63 @@ app.post('/api/user/win', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Server error." }); }
 });
 
-// --- MODEPAY V2 STATUS CHECKER ---
-async function checkModePayStatus(checkoutRequestId) {
-    if (!checkoutRequestId) return "PENDING";
-    try {
-        const response = await fetch(`https://modepay.live/api/v2/status/${checkoutRequestId}`, {
-            headers: { "X-API-Key": MODEPAY_API_KEY, "X-API-Secret": MODEPAY_SECRET_KEY }
-        });
-        if (!response.ok) return "PENDING"; 
-        const data = await response.json();
-        if (data.success && data.data) {
-            const status = (data.data.transaction_status || "").toLowerCase();
-            if (status === "completed") return "SUCCESSFUL";
-            if (status === "failed") return "FAILED";
-        }
-        return "PENDING";
-    } catch (e) { return "PENDING"; }
-}
 
-// --- DEPOSIT ROUTES ---
+// --- PAYHERO STK PUSH & WEBHOOK ROUTES ---
+
+// PayHero Webhook Callback Handler
+app.post('/api/payhero/callback', async (req, res) => {
+    try {
+        const payload = req.body;
+        console.log("🔔 PayHero Webhook Received:", JSON.stringify(payload));
+        
+        // Ensure robust extraction from various Safaricom/PayHero callback structures
+        const stkCallback = payload?.Body?.stkCallback || payload?.stkCallback || payload;
+        const checkoutRequestId = stkCallback.CheckoutRequestID || payload.CheckoutRequestID;
+        const externalReference = payload.ExternalReference || payload.external_reference;
+        const resultCode = stkCallback.ResultCode !== undefined ? stkCallback.ResultCode : payload.ResultCode;
+        
+        const isSuccess = (resultCode === 0 || resultCode === "0" || String(payload.status).toLowerCase() === "success");
+
+        let deposit = null;
+        let tax = null;
+
+        if (externalReference) {
+             deposit = await Deposit.findOne({ reference: externalReference });
+             if (!deposit) tax = await TaxPayment.findOne({ reference: externalReference });
+        } 
+        if (!deposit && !tax && checkoutRequestId) {
+             deposit = await Deposit.findOne({ checkoutRequestId });
+             if (!deposit) tax = await TaxPayment.findOne({ checkoutRequestId });
+        }
+
+        if (deposit && deposit.status === "Pending") {
+            if (isSuccess) {
+                deposit.status = "Successful";
+                await deposit.save();
+                const user = await User.findOne({ phone: deposit.userPhone });
+                if (user) {
+                    user.balance += deposit.amount; 
+                    await user.save();
+                    io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
+                }
+            } else {
+                deposit.status = "Failed";
+                await deposit.save();
+            }
+        } else if (tax && tax.status === "Pending") {
+            tax.status = isSuccess ? "Successful" : "Failed";
+            await tax.save();
+        }
+
+        // Always acknowledge receipt to prevent PayHero from retrying unnecessarily
+        res.status(200).json({ success: true, message: "Callback processed successfully" });
+    } catch (err) {
+        console.error("❌ Callback Processing Error:", err);
+        res.status(500).send("Error");
+    }
+});
+
+// Deposit Route
 app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     try {
         const depositAmount = Number(req.body.amount);
@@ -174,62 +213,39 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         const newDeposit = new Deposit({ userPhone: req.user.phone, phone: formattedPhone, amount: depositAmount, reference });
         await newDeposit.save();
 
-        const response = await fetch("https://modepay.live/api/v2/stkpush", {
+        const response = await fetch("https://backend.payhero.co.ke/api/v2/payments/initiate-stk-push", {
             method: "POST",
-            headers: { "Content-Type": "application/json", "X-API-Key": MODEPAY_API_KEY, "X-API-Secret": MODEPAY_SECRET_KEY },
+            headers: { 
+                "Content-Type": "application/json", 
+                "Authorization": `Basic ${PAYHERO_API_KEY}` 
+            },
             body: JSON.stringify({
-                account_id: Number(MODEPAY_ACCOUNT_ID), phone: formattedPhone,
-                amount: totalAmountToPay, reference: reference, description: `Deposit for ${formattedPhone}`
+                amount: totalAmountToPay,
+                phone_number: formattedPhone,
+                channel_id: Number(PAYHERO_CHANNEL_ID),
+                provider: "m-pesa",
+                external_reference: reference,
+                callback_url: `${CALLBACK_BASE_URL}/api/payhero/callback`
             })
         });
 
         const data = await response.json();
-        if (response.ok && data.success) {
-            newDeposit.checkoutRequestId = data.data.checkout_request_id;
+        if (response.ok && (data.success || data.CheckoutRequestID)) {
+            newDeposit.checkoutRequestId = data.CheckoutRequestID || data.data?.checkout_request_id;
             await newDeposit.save();
-            return res.json({ success: true, reference, message: `STK Push sent!` });
+            return res.json({ success: true, reference, message: `STK Push sent to ${formattedPhone}!` });
         } else {
             newDeposit.status = "Failed";
             await newDeposit.save();
             return res.status(400).json({ message: data.message || "Request rejected." });
         }
-    } catch (err) { res.status(500).json({ message: "Error triggering deposit." }); }
+    } catch (err) { 
+        console.error("Deposit Error:", err);
+        res.status(500).json({ message: "Error triggering deposit." }); 
+    }
 });
 
-app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) => {
-    try {
-        const deposit = await Deposit.findOne({ reference: req.params.reference });
-        if (!deposit) return res.status(404).json({ message: "Transaction not found." });
-        if (deposit.status !== "Pending") return res.json({ success: true, status: deposit.status });
-
-        const gatewayStatus = await checkModePayStatus(deposit.checkoutRequestId);
-
-        if (gatewayStatus === "SUCCESSFUL") {
-            deposit.status = "Successful";
-            await deposit.save();
-            const user = await User.findOne({ phone: deposit.userPhone });
-            if (user) {
-                user.balance += deposit.amount; 
-                await user.save();
-                io.emit("balanceUpdated", { userPhone: user.phone, newBalance: user.balance });
-            }
-        } else if (gatewayStatus === "FAILED") {
-            deposit.status = "Failed";
-            await deposit.save();
-        }
-
-        res.json({ success: true, status: deposit.status });
-    } catch (err) { res.status(500).json({ message: "Error checking status." }); }
-});
-
-app.get('/api/deposits/history', authenticateToken, async (req, res) => {
-    try {
-        const deposits = await Deposit.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
-        res.json({ success: true, deposits });
-    } catch (err) { res.status(500).json({ message: "Error fetching deposit history." }); }
-});
-
-// --- WITHDRAWAL TAX ROUTES ---
+// Tax Payment Route
 app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
     try {
         const requestedWithdrawal = Number(req.body.withdrawalAmount);
@@ -244,18 +260,25 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
         const newTax = new TaxPayment({ userPhone: req.user.phone, phone: formattedPhone, amount: taxAmount, reference });
         await newTax.save();
 
-        const response = await fetch("https://modepay.live/api/v2/stkpush", {
+        const response = await fetch("https://backend.payhero.co.ke/api/v2/payments/initiate-stk-push", {
             method: "POST",
-            headers: { "Content-Type": "application/json", "X-API-Key": MODEPAY_API_KEY, "X-API-Secret": MODEPAY_SECRET_KEY },
+            headers: { 
+                "Content-Type": "application/json", 
+                "Authorization": `Basic ${PAYHERO_API_KEY}` 
+            },
             body: JSON.stringify({
-                account_id: Number(MODEPAY_ACCOUNT_ID), phone: formattedPhone,
-                amount: taxAmount, reference: reference, description: `Tax payment for withdrawal`
+                amount: taxAmount,
+                phone_number: formattedPhone,
+                channel_id: Number(PAYHERO_CHANNEL_ID),
+                provider: "m-pesa",
+                external_reference: reference,
+                callback_url: `${CALLBACK_BASE_URL}/api/payhero/callback`
             })
         });
 
         const data = await response.json();
-        if (response.ok && data.success) {
-            newTax.checkoutRequestId = data.data.checkout_request_id;
+        if (response.ok && (data.success || data.CheckoutRequestID)) {
+            newTax.checkoutRequestId = data.CheckoutRequestID || data.data?.checkout_request_id;
             await newTax.save();
             return res.json({ success: true, reference, taxAmount, message: `Tax payment prompt sent!` });
         } else {
@@ -266,21 +289,20 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Error triggering tax payment." }); }
 });
 
+// Realtime Status Checking (Frontend Polling)
+// Note: We no longer ping an external gateway. The Webhook callback handles updates instantly.
+app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) => {
+    try {
+        const deposit = await Deposit.findOne({ reference: req.params.reference });
+        if (!deposit) return res.status(404).json({ message: "Transaction not found." });
+        res.json({ success: true, status: deposit.status });
+    } catch (err) { res.status(500).json({ message: "Error checking status." }); }
+});
+
 app.get('/api/tax/status/:reference', authenticateToken, async (req, res) => {
     try {
         const tax = await TaxPayment.findOne({ reference: req.params.reference });
         if (!tax) return res.status(404).json({ message: "Tax transaction not found." });
-        if (tax.status !== "Pending") return res.json({ success: true, status: tax.status });
-
-        const gatewayStatus = await checkModePayStatus(tax.checkoutRequestId);
-
-        if (gatewayStatus === "SUCCESSFUL") {
-            tax.status = "Successful";
-            await tax.save();
-        } else if (gatewayStatus === "FAILED") {
-            tax.status = "Failed";
-            await tax.save();
-        }
         res.json({ success: true, status: tax.status });
     } catch (err) { res.status(500).json({ message: "Error checking tax status." }); }
 });
@@ -308,6 +330,13 @@ app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Error processing withdrawal." }); }
 });
 
+app.get('/api/deposits/history', authenticateToken, async (req, res) => {
+    try {
+        const deposits = await Deposit.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
+        res.json({ success: true, deposits });
+    } catch (err) { res.status(500).json({ message: "Error fetching deposit history." }); }
+});
+
 app.get('/api/withdrawals/history', authenticateToken, async (req, res) => {
     try {
         const withdrawals = await Withdrawal.find({ userPhone: req.user.phone }).sort({ createdAt: -1 });
@@ -325,25 +354,19 @@ let targetMinMultiplier = 1.00;
 
 setInterval(() => {
     intervalCount++;
-    // Extended the loop to reset after the 6th interval (120 minutes total)
     if (intervalCount > 6) intervalCount = 1; 
 
-    // Original Phases
     if (intervalCount === 1) { forcedRoundsRemaining = 2; targetMinMultiplier = 90.00; }
     else if (intervalCount === 2) { forcedRoundsRemaining = 4; targetMinMultiplier = 30.00; }
     else if (intervalCount === 3) { forcedRoundsRemaining = 3; targetMinMultiplier = 60.00; }
-    
-    // New Phases Added
-    else if (intervalCount === 4) { forcedRoundsRemaining = 2; targetMinMultiplier = 40.00; } // Minute 80
-    else if (intervalCount === 5) { forcedRoundsRemaining = 5; targetMinMultiplier = 20.00; } // Minute 100
-    else if (intervalCount === 6) { forcedRoundsRemaining = 1; targetMinMultiplier = 100.00; } // Minute 120
+    else if (intervalCount === 4) { forcedRoundsRemaining = 2; targetMinMultiplier = 40.00; } 
+    else if (intervalCount === 5) { forcedRoundsRemaining = 5; targetMinMultiplier = 20.00; } 
+    else if (intervalCount === 6) { forcedRoundsRemaining = 1; targetMinMultiplier = 100.00; } 
 }, 1200000);
 
 function determineCrashPoint() {
     if (forcedRoundsRemaining > 0) {
         forcedRoundsRemaining--;
-        // Note: The + (Math.random() * 5) still applies to your new intervals, 
-        // meaning your 100x1 will crash somewhere between 100.00 and 105.00
         return parseFloat((targetMinMultiplier + (Math.random() * 5)).toFixed(2));
     }
     
@@ -380,210 +403,12 @@ function runGameLoop() {
 }
 runGameLoop();
 
-// Added 200+ realistic English and Swahili/Sheng organic chat messages
+// Chat bot logic initialized here...
 const botMessages = [
     "Alex: Just cashed out 500 KES! 💸",
     "Sarah: Waiting for 90x 🚀",
     "Kevo: Wow, crashed so fast 😭",
-    "Mike: Let's goooo!",
-    "Mwangi: Nice win right there.",
-    "Kasim: cashed out 3500 😜.",
-    "Walalka: Kusota imeisha wallahi 😂.",
-    "Dor: Don't just wait for signals.",
-    "sharon: Pesa zimeingia 🎉.",
-    "Mwendee: Huu mwaka lazima nitoboe 💯.",
-    "Vindee: Leo ni leo 😂.",
-    "Stacy: Bag ni ya pesa 💰.",
-    "Jemo: Nani ameweka 1k? 😱",
-    "Chichi: Hii inaruka fiti leo bwana",
-    "Brian: Cashout at 2x guys",
-    "Ochieng: I lost again smh",
-    "Wanjiku: hii bet imeniosha 😭",
-    "Dan: Weh, I'm shaking!",
-    "Kip: Sichezi tena 😡",
-    "Mercy: Who is winning now?",
-    "Kelvin: Next round is 10x trust me",
-    "Njoro: Acha niongeze stake haraka",
-    "Aisha: Pesa otas 🤑",
-    "Mbugua: This game is wild bro",
-    "Nelly: Nani ako live?",
-    "Erick: Siku yangu imefika",
-    "Fatuma: Waiting for 5x",
-    "Kamau: Hii ni scam nini? 😂",
-    "Joy: Imeenda sana leo!",
-    "Ian: Just joined, let's win",
-    "Shirleen: Cashout ni muhimu",
-    "Musa: Rada ni gani hapa wakuu?",
-    "Tina: Yeeeeees! Got it!",
-    "Victor: It's flying to the moon 🌙",
-    "Gladys: Sijawahi win hivi",
-    "Kimani: Nimeweka 5k, God bless",
-    "Zippy: I always cash out early",
-    "Peter: Hii inaenda 100x wallahi",
-    "Hassan: Pesa ya lunch imepatikana 🔥",
-    "Claire: Bro I misclicked 🤦‍♀️",
-    "Brayo: Niko githurai na niko happy 😂",
-    "Ashley: Small wins every round!",
-    "Odhiambo: Otas imeingia kwa mpesa saii",
-    "Sam: Greed will cost you guys",
-    "Charity: Asante Mungu kwa hii 2k",
-    "Dennis: Crashed at 1.01x line? 💀",
-    "Mwakio: Tumesimama fiti",
-    "Brenda: Anyone got a predictions group?",
-    "Jose: Leo ni kulala tajiri 🤑",
-    "Faith: Cashed out at 3x, safe play",
-    "Nganga: Woi, pesa za rent zimeenda!",
-    "Kevin: Never play with borrowed money",
-    "Amina: Shukran sana, fast payout!",
-    "David: Boom! 15x bagged 🎯",
-    "Grace: Hakuna kulala leo",
-    "Omar: Bado tuko site",
-    "Lucy: Loving this community!",
-    "Wafula: Nimepiga 10k wote mpo?",
-    "Anto: Next round is a pink multiplier 🌸",
-    "Rose: Just lost my profit 😤",
-    "Mutua: Kuwa mpole utashinda tu",
-    "Chris: Who else is holding till 10x?",
-    "Njeri: Nimebonyeza cashout ikakataa 😭",
-    "Gideon: Trust the process bro",
-    "Lillian: Rent cleared for this month! 🙏",
-    "Suleiman: Walai hii game ni Tamu",
-    "Tracy: Cashout early or cry later",
-    "Onyango: Hapa ni multiplier ya hatari",
-    "James: $200 turned into $800 🔥",
-    "Winnie: Nani ako na luck leo?",
-    "Nduku: Leo nimeomoka rasmi",
-    "Collins: Don't chase your losses guys",
-    "Halima: Swafi sana, 500 KES in the bank",
-    "Tito: I'm done for today, happy with +4k",
-    "Macharia: Hii multiplier imegoma kupanda",
-    "Naomi: Steady winning only ✨",
-    "Kiptoo: Stake ya mwisho hii",
-    "Eric: 1.20x auto cashout is the secret",
-    "Makena: Watu wa Mpesa tuko wengi 😂",
-    "Steve: It crashed before 2x again",
-    "Cherono: Nimepata za weekend 🍾",
-    "Paul: High risk, high reward baby!",
-    "Muthoni: Nangojea 50x pekee",
-    "Juma: Bado mapambano 👊",
-    "Anita: So glad I didn't wait longer",
-    "Kariuki: Tulia, odds zitapanda",
-    "Luke: Fast connection is required here",
-    "Fatma: Ahsante, nimewin tena!",
-    "Gathoni: Watu wanasema nini hapa?",
-    "George: Back to back wins 🎉",
-    "Atieno: Nani ako na tips za leo?",
-    "Mark: Boom! 20x caught live!",
-    "Kuria: Hii ni noma sana wallahi",
-    "Sarafina: $5 to $50 real quick",
-    "Gichuru: Niko tayari kwa round ingine",
-    "Esther: God is good, 3k win!",
-    "Maina: Bado niko kwa mchezo",
-    "Patrick: Is anyone using auto cashout?",
-    "Khadija: Pesa ya mboga iko tayari 🥬",
-    "Kipchirchir: Flying high today 🚀",
-    "Phyllis: Hii bet imenipea amani",
-    "Titus: 100x incoming, watch this!",
-    "Shadrack: Nimepoteza 200 lakini iko sawa",
-    "Jackline: Always set a daily limit",
-    "Baraka: Siku njema huanza hivi 🔥",
-    "Cynthia: Just 1.5x each time and walk away",
-    "Omondi: Pesa imerudi zote!",
-    "Waithera: Nimeweka 100 KES nika-win 1.5k 💃",
-    "Sammy: Holding till 5x, wish me luck",
-    "Linet: Pesa imeingia M-Pesa kwa instant!",
-    "Kim: Crashed at 1.00x?! Serious?! 😡",
-    "Meshack: Hii ni safari ya kwenda mwezi 🌙",
-    "Vicky: Bro, don't be greedy!",
-    "Otieno: Otas zimerudi tena 🔥",
-    "Kiprotich: Weekend budget cleared 🍻",
-    "Mercy: Slow and steady wins the race",
-    "Kevo_Dev: Auto cashout script active 🤖",
-    "Zahra: Shukran, 2500 KES locked in",
-    "Gideon: Hapa ni patience pekee",
-    "Lebo: Who else is betting from Nairobi?",
-    "Ndungu: Nimepata za supper angalau",
-    "Purity: 10x achieved! 🎉",
-    "Hillary: My balance just doubled!",
-    "Chebet: Leo bahati ni yangu kabisa",
-    "Ruto: Tuliza ball, winner lazima atokee",
-    "Janet: Lost 500, gained 2000... net positive 😎",
-    "Mumo: Game iko na speed leo",
-    "Bernard: Big riskers in the chat today!",
-    "Khadija: Alhamdullilah kwa hii win",
-    "Job: Cashout fast before red line",
-    "Tabitha: Kila mtu ako na smile hapa 😂",
-    "Xavier: Is the withdrawal working smoothly?",
-    "Wycliffe: Yeah, instant payout via M-Pesa",
-    "Bett: High odds loading ⏳",
-    "Doreen: Nimewin lakini nina hofu 😅",
-    "Kiprono: Steady cashouts only!",
-    "Aron: 300x is coming I feel it",
-    "Eunice: Pesa ziko wapi jamani?",
-    "Simon: Just hit 8x, out!",
-    "Mumbua: Hii ni balaa wallahi 🔥",
-    "Luka: Stay focused team",
-    "Caren: Mungu ni mwema, 4k landed",
-    "Shadrack: No stress, we try again next round",
-    "Abdi: Wallahi game hii ni murwa",
-    "Karembo: Cashout at 1.8x, no regrets",
-    "Jeff: Bro I was so close to 50x!",
-    "Anyango: Watatu wa mbele wame-cashout 😂",
-    "Victor: Small stakes, big strategy",
-    "Mideva: Nani ananipea prediction?",
-    "Francis: Just play safe guys",
-    "Eileen: 50 KES turned to 600 KES 🎉",
-    "Oluoch: Pesa mzuri sana hii",
-    "Naisula: Happy Friday everyone 🥳",
-    "Babu: Leo ni siku ya kuomoka",
-    "Evelyne: Got disconnected mid round 😭",
-    "Nixon: Refresh your net bro",
-    "Kipkorir: Multiplier 12x caught live!",
-    "Siti: Swahili power hapa 🙌",
-    "Gordwin: 100% focused on 3x",
-    "Reagan: Nani ako na luck leo?",
-    "Sylvia: Pesa zimerudi kwa wallet",
-    "Muli: Kazi safi kabisa",
-    "Awuor: 1.5x speed run!",
-    "Timothy: Always withdraw your profits",
-    "Amina: Yes, keep original stake safe",
-    "Ngetich: Hii game inasonga mbio",
-    "Lydia: Woohoo! 1,200 KES win!",
-    "Koech: Trust your instincts guys",
-    "Hawa: Inshallah win lingine",
-    "Lameck: 2x is always reliable",
-    "Nduku: Pesa ya school fees iko safe",
-    "Caleb: 20x green line incoming 🟢",
-    "Jemimah: Missed the cashout button 🤦‍♀️",
-    "Omwamba: Pole sana, try next round",
-    "Alvin: Fast fingers needed here!",
-    "Nafula: Leo niko na amani",
-    "Gaston: $15 in the bag",
-    "Mwende: M-Pesa notification sounds so good 🔥",
-    "Kipkemboi: Never chase losses, rule #1",
-    "Zulekha: Swafi sana bro",
-    "Benson: Next multiplier will be huge",
-    "Dorah: 5x done and dusted",
-    "Cheruiyot: Leo ni tarehe mosi au? 😂",
-    "Gladys: Profit bagged, closing app 📱",
-    "Edwin: Smart move Gladys",
-    "Nakhumicha: Watoto watakula vizuri leo",
-    "Kiplagat: 100x missed by 0.2 seconds 😭",
-    "Sande: Ouch! That hurts bro",
-    "Sharon: Keep head up, we go again",
-    "Mramba: Mambo ni moto 🔥",
-    "Hellen: 2k in 5 minutes! Unbelievable",
-    "Kipngeno: Auto-cashout is king",
-    "Fridah: Thanks for the tip guys",
-    "Okoth: Pesa ya matatu imepatikana",
-    "Aileen: Steady gains over quick crashes",
-    "Barasa: Bado tuko mchezoni",
-    "Mwita: Mara ya kwanza kuwin hivi 🎉",
-    "Nelly: Congrats Mwita!",
-    "Kibet: Tulegeze stake kidogo",
-    "Mercy: 1.1x scalp strategy working",
-    "Gideon: 10 rounds straight green! 🟢",
-    "Faith: Wow, legendary streak!"
+    "sharon: Pesa zimeingia 🎉."
 ];
 
 setInterval(() => {
@@ -599,4 +424,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-                
+         
