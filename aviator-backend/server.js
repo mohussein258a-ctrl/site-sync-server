@@ -213,7 +213,7 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         const newDeposit = new Deposit({ userPhone: req.user.phone, phone: formattedPhone, amount: depositAmount, reference });
         await newDeposit.save();
 
-        const response = await fetch("https://backend.payhero.co.ke/api/v2/payments/initiate-stk-push", {
+        const response = await fetch("https://backend.payhero.co.ke/api/v2/payments", {
             method: "POST",
             headers: { 
                 "Content-Type": "application/json", 
@@ -235,6 +235,9 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
             await newDeposit.save();
             return res.json({ success: true, reference, message: `STK Push sent to ${formattedPhone}!` });
         } else {
+            // NEW LOGGING ADDED HERE
+            console.error("❌ PayHero Deposit API Rejection:", response.status, data); 
+
             newDeposit.status = "Failed";
             await newDeposit.save();
             return res.status(400).json({ message: data.message || "Request rejected." });
@@ -260,7 +263,7 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
         const newTax = new TaxPayment({ userPhone: req.user.phone, phone: formattedPhone, amount: taxAmount, reference });
         await newTax.save();
 
-        const response = await fetch("https://backend.payhero.co.ke/api/v2/payments/initiate-stk-push", {
+        const response = await fetch("https://backend.payhero.co.ke/api/v2/payments", {
             method: "POST",
             headers: { 
                 "Content-Type": "application/json", 
@@ -282,6 +285,9 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
             await newTax.save();
             return res.json({ success: true, reference, taxAmount, message: `Tax payment prompt sent!` });
         } else {
+            // NEW LOGGING ADDED HERE
+            console.error("❌ PayHero Tax API Rejection:", response.status, data);
+
             newTax.status = "Failed";
             await newTax.save();
             return res.status(400).json({ message: "Tax payment request rejected." });
@@ -290,7 +296,6 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
 });
 
 // Realtime Status Checking (Frontend Polling)
-// Note: We no longer ping an external gateway. The Webhook callback handles updates instantly.
 app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) => {
     try {
         const deposit = await Deposit.findOne({ reference: req.params.reference });
@@ -424,4 +429,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-         
+    
