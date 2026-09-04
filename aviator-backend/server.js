@@ -160,11 +160,16 @@ app.post('/api/payhero/callback', async (req, res) => {
         
         // Ensure robust extraction from various Safaricom/PayHero callback structures
         const stkCallback = payload?.Body?.stkCallback || payload?.stkCallback || payload;
-        const checkoutRequestId = stkCallback.CheckoutRequestID || payload.CheckoutRequestID;
-        const externalReference = payload.ExternalReference || payload.external_reference;
-        const resultCode = stkCallback.ResultCode !== undefined ? stkCallback.ResultCode : payload.ResultCode;
         
-        const isSuccess = (resultCode === 0 || resultCode === "0" || String(payload.status).toLowerCase() === "success");
+        // Added payload.checkout_request_id for PayHero v2
+        const checkoutRequestId = stkCallback.CheckoutRequestID || payload.CheckoutRequestID || payload.checkout_request_id;
+        
+        // Added payload.reference to accurately match your DB record
+        const externalReference = payload.ExternalReference || payload.external_reference || payload.reference || stkCallback.ExternalReference;
+        
+        const resultCode = stkCallback.ResultCode !== undefined ? stkCallback.ResultCode : (payload.ResultCode !== undefined ? payload.ResultCode : payload.result_code);
+        
+        const isSuccess = (resultCode === 0 || resultCode === "0" || String(payload.status).toLowerCase() === "success" || String(payload.status).toLowerCase() === "completed");
 
         let deposit = null;
         let tax = null;
@@ -180,8 +185,11 @@ app.post('/api/payhero/callback', async (req, res) => {
 
         if (deposit && deposit.status === "Pending") {
             if (isSuccess) {
-                deposit.status = "Successful";
+                // Status changed to "Completed" to match frontend UI
+                deposit.status = "Completed"; 
                 await deposit.save();
+                
+                // Add money to the user's balance
                 const user = await User.findOne({ phone: deposit.userPhone });
                 if (user) {
                     user.balance += deposit.amount; 
@@ -193,7 +201,8 @@ app.post('/api/payhero/callback', async (req, res) => {
                 await deposit.save();
             }
         } else if (tax && tax.status === "Pending") {
-            tax.status = isSuccess ? "Successful" : "Failed";
+            // Status changed to "Completed"
+            tax.status = isSuccess ? "Completed" : "Failed";
             await tax.save();
         }
 
@@ -335,7 +344,8 @@ app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
         if (amount < 4000) return res.status(400).json({ message: "Minimum withdrawal is 4000 KES." });
         if (!user || user.balance < amount) return res.status(400).json({ message: "Insufficient balance." });
         
-        const successfulTax = await TaxPayment.findOne({ userPhone: req.user.phone, status: "Successful", isUsed: false });
+        // Updated to look for "Completed" instead of "Successful" to match the updated webhook status
+        const successfulTax = await TaxPayment.findOne({ userPhone: req.user.phone, status: "Completed", isUsed: false });
         if (!successfulTax) return res.status(400).json({ message: "Upfront tax must be paid before withdrawal." });
 
         successfulTax.isUsed = true;
@@ -444,3 +454,4 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
+                                       
