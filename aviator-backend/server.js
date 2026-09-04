@@ -84,8 +84,9 @@ const Withdrawal = mongoose.model('Withdrawal', withdrawalSchema);
 // --- HELPER FUNCTION ---
 function formatPhoneNumber(phone) {
     let cleaned = phone.replace(/\D/g, '');
-    if (cleaned.startsWith('0')) cleaned = '254' + cleaned.slice(1);
-    else if (cleaned.startsWith('7') || cleaned.startsWith('1')) cleaned = '254' + cleaned;
+    // PayHero docs require local format (e.g., 0787677676)
+    if (cleaned.startsWith('254')) cleaned = '0' + cleaned.slice(3);
+    else if (cleaned.startsWith('7') || cleaned.startsWith('1')) cleaned = '0' + cleaned;
     return cleaned;
 }
 
@@ -235,16 +236,20 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
         });
 
         const data = await response.json();
+        
         if (response.ok && (data.success || data.CheckoutRequestID)) {
             newDeposit.checkoutRequestId = data.CheckoutRequestID || data.data?.checkout_request_id;
             await newDeposit.save();
             return res.json({ success: true, reference, message: `STK Push sent to ${formattedPhone}!` });
         } else {
-            console.error("❌ PayHero Deposit API Rejection:", response.status, data); 
+            const errorPayload = JSON.stringify(data);
+            console.error(`❌ PayHero Deposit API Rejection (Status: ${response.status}):`, errorPayload); 
 
             newDeposit.status = "Failed";
             await newDeposit.save();
-            return res.status(400).json({ message: data.message || "Request rejected." });
+            
+            const errMessage = data.message || data.error || data.detail || `API Error: ${errorPayload}`;
+            return res.status(400).json({ message: errMessage });
         }
     } catch (err) { 
         console.error("Deposit Error:", err);
@@ -284,18 +289,25 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
         });
 
         const data = await response.json();
+        
         if (response.ok && (data.success || data.CheckoutRequestID)) {
             newTax.checkoutRequestId = data.CheckoutRequestID || data.data?.checkout_request_id;
             await newTax.save();
             return res.json({ success: true, reference, taxAmount, message: `Tax payment prompt sent!` });
         } else {
-            console.error("❌ PayHero Tax API Rejection:", response.status, data);
+            const errorPayload = JSON.stringify(data);
+            console.error(`❌ PayHero Tax API Rejection (Status: ${response.status}):`, errorPayload);
 
             newTax.status = "Failed";
             await newTax.save();
-            return res.status(400).json({ message: "Tax payment request rejected." });
+            
+            const errMessage = data.message || data.error || data.detail || `API Error: ${errorPayload}`;
+            return res.status(400).json({ message: errMessage });
         }
-    } catch (err) { res.status(500).json({ message: "Error triggering tax payment." }); }
+    } catch (err) { 
+        console.error("Tax Payment Error:", err);
+        res.status(500).json({ message: "Error triggering tax payment." }); 
+    }
 });
 
 // Realtime Status Checking (Frontend Polling)
@@ -432,4 +444,3 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-    
