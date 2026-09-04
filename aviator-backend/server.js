@@ -21,7 +21,12 @@ const JWT_SECRET = process.env.JWT_SECRET || "pilot_hamoody_secret_key_2026";
 const MONGODB_URI = process.env.MONGODB_URI;
 
 // PAYHERO API CONFIGURATION
-const PAYHERO_API_KEY = (process.env.PAYHERO_API_KEY || "").replace(/['"]/g, "").trim();
+let rawApiKey = (process.env.PAYHERO_API_KEY || "").replace(/['"]/g, "").trim();
+// Automatically remove "Basic " if present to avoid duplicated headers
+if (rawApiKey.toLowerCase().startsWith("basic ")) {
+    rawApiKey = rawApiKey.slice(6).trim();
+}
+const PAYHERO_API_KEY = rawApiKey;
 const PAYHERO_CHANNEL_ID = (process.env.PAYHERO_CHANNEL_ID || "").replace(/['"]/g, "").trim();
 const CALLBACK_BASE_URL = (process.env.CALLBACK_BASE_URL || "https://your-domain.com").replace(/\/$/, "");
 
@@ -235,7 +240,6 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
             await newDeposit.save();
             return res.json({ success: true, reference, message: `STK Push sent to ${formattedPhone}!` });
         } else {
-            // NEW LOGGING ADDED HERE
             console.error("❌ PayHero Deposit API Rejection:", response.status, data); 
 
             newDeposit.status = "Failed";
@@ -285,7 +289,6 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
             await newTax.save();
             return res.json({ success: true, reference, taxAmount, message: `Tax payment prompt sent!` });
         } else {
-            // NEW LOGGING ADDED HERE
             console.error("❌ PayHero Tax API Rejection:", response.status, data);
 
             newTax.status = "Failed";
