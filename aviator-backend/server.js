@@ -22,7 +22,6 @@ const MONGODB_URI = process.env.MONGODB_URI;
 
 // PAYHERO API CONFIGURATION
 let rawApiKey = (process.env.PAYHERO_API_KEY || "").replace(/['"]/g, "").trim();
-// Automatically remove "Basic " if present to avoid duplicated headers
 if (rawApiKey.toLowerCase().startsWith("basic ")) {
     rawApiKey = rawApiKey.slice(6).trim();
 }
@@ -84,7 +83,6 @@ const Withdrawal = mongoose.model('Withdrawal', withdrawalSchema);
 // --- HELPER FUNCTION ---
 function formatPhoneNumber(phone) {
     let cleaned = phone.replace(/\D/g, '');
-    // PayHero docs require local format (e.g., 0787677676)
     if (cleaned.startsWith('254')) cleaned = '0' + cleaned.slice(3);
     else if (cleaned.startsWith('7') || cleaned.startsWith('1')) cleaned = '0' + cleaned;
     return cleaned;
@@ -105,7 +103,6 @@ const authenticateToken = (req, res, next) => {
 // --- AUTH ROUTES ---
 app.post('/api/register', async (req, res) => {
     try {
-        // Flexibly capture whichever name variable the frontend sends
         const { phone, password, name, userName, username } = req.body;
         const finalUserName = name || userName || username || "Player";
 
@@ -118,10 +115,12 @@ app.post('/api/register', async (req, res) => {
         });
         
         await newUser.save();
+        const userData = { ...newUser.toObject(), name: newUser.userName };
+
         res.status(201).json({ 
             success: true, 
             token: jwt.sign({ userId: newUser._id, phone: newUser.phone }, JWT_SECRET, { expiresIn: '7d' }), 
-            user: newUser 
+            user: userData 
         });
     } catch (err) { 
         res.status(500).json({ message: "Server error." }); 
@@ -131,14 +130,33 @@ app.post('/api/register', async (req, res) => {
 app.post('/api/login', async (req, res) => {
     try {
         const user = await User.findOne({ phone: req.body.phone });
-        if (!user || !(await bcrypt.compare(req.body.password, user.password))) return res.status(400).json({ message: "Invalid credentials." });
-        res.json({ success: true, token: jwt.sign({ userId: user._id, phone: user.phone }, JWT_SECRET, { expiresIn: '7d' }), user });
-    } catch (err) { res.status(500).json({ message: "Server error." }); }
+        if (!user || !(await bcrypt.compare(req.body.password, user.password))) {
+            return res.status(400).json({ message: "Invalid credentials." });
+        }
+        
+        const userData = { ...user.toObject(), name: user.userName };
+        
+        res.json({ 
+            success: true, 
+            token: jwt.sign({ userId: user._id, phone: user.phone }, JWT_SECRET, { expiresIn: '7d' }), 
+            user: userData 
+        });
+    } catch (err) { 
+        res.status(500).json({ message: "Server error." }); 
+    }
 });
 
 app.get('/api/me', authenticateToken, async (req, res) => {
-    const user = await User.findById(req.user.userId);
-    res.json(user ? { success: true, user } : { message: "User not found." });
+    try {
+        const user = await User.findById(req.user.userId);
+        if (!user) return res.status(404).json({ message: "User not found." });
+        
+        const userData = { ...user.toObject(), name: user.userName };
+        
+        res.json({ success: true, user: userData });
+    } catch (err) {
+        res.status(500).json({ message: "Server error." });
+    }
 });
 
 // --- BET AND BALANCE SYNC ROUTES ---
@@ -164,10 +182,7 @@ app.post('/api/user/win', authenticateToken, async (req, res) => {
     } catch (err) { res.status(500).json({ message: "Server error." }); }
 });
 
-
 // --- PAYHERO STK PUSH & WEBHOOK ROUTES ---
-
-// PayHero Webhook Callback Handler
 app.post('/api/payhero/callback', async (req, res) => {
     try {
         const payload = req.body;
@@ -226,7 +241,6 @@ app.post('/api/payhero/callback', async (req, res) => {
     }
 });
 
-// Deposit Route
 app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     try {
         const depositAmount = Number(req.body.amount);
@@ -278,7 +292,6 @@ app.post('/api/deposit/stkpush', authenticateToken, async (req, res) => {
     }
 });
 
-// Tax Payment Route
 app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
     try {
         const requestedWithdrawal = Number(req.body.withdrawalAmount);
@@ -331,7 +344,6 @@ app.post('/api/tax/stkpush', authenticateToken, async (req, res) => {
     }
 });
 
-// Realtime Status Checking (Frontend Polling)
 app.get('/api/deposit/status/:reference', authenticateToken, async (req, res) => {
     try {
         const deposit = await Deposit.findOne({ reference: req.params.reference });
@@ -444,12 +456,19 @@ function runGameLoop() {
 }
 runGameLoop();
 
-// --- 300+ LIVE CHAT BOT MESSAGES (DYNAMIC KENYAN GENERATOR) ---
+// --- 500+ LIVE CHAT BOT MESSAGES (DYNAMIC KENYAN GENERATOR) ---
 const kenyanNames = [
     "Kamau", "Ochieng", "Wanjiku", "Brian", "Mercy", "Otieno", "Njoroge", 
     "Stacy", "Mwangi", "Fatuma", "Kevo", "Juma", "Akinyi", "Dennis", 
     "Kip", "Sarah", "Alex", "Shirley", "Gideon", "Monicah", "Ndung'u", 
-    "Chebet", "Odhiambo", "Wambui", "Maina"
+    "Chebet", "Odhiambo", "Wambui", "Maina", "Kipchoge", "Amina", "Hassan", 
+    "Nekesa", "Mutua", "Wamalwa", "Nyokabi", "Karanja", "Muthoni", "Cheruiyot", 
+    "Kibet", "Nafula", "Ouma", "Atieno", "Njeri", "Makena", "Auma", "Omondi", 
+    "Kemboi", "Korir", "Kiprop", "Naliaka", "Wangari", "Kimani", "Macharia", 
+    "Waithera", "Wanjala", "Kiplagat", "Chepkemoi", "Nasimiyu", "Wekesa", 
+    "Mumbua", "Kioko", "Mutuku", "Syombua", "Kilonzo", "Nduku", "Waweru", 
+    "Nyambura", "Githinji", "Gacheru", "Njenga", "Wangechi", "Kariuki", 
+    "Kinyua", "Mumbi", "Bundi", "Njeru", "Kagwe", "Moraa"
 ];
 
 const chatTemplates = [
@@ -477,16 +496,65 @@ const chatTemplates = [
     "Nani ameweka {amount} KES?",
     "Hii round iende hadi {multi}x tu.",
     "Almost lost my {amount} Ksh! Phew 😅",
-    "Cashing out early, 2x is enough for me."
+    "Cashing out early, 2x is enough for me.",
+    "Wueh, hii game inabamba! Cashed out {amount} KES.",
+    "Just hit {multi}x, I can't believe it!",
+    "Mimi natoka at {multi}x, sitaki stress.",
+    "Eish, {amount} Ksh secured for the weekend.",
+    "Safaricom just confirmed my {amount} Bob 🥳",
+    "Nani ameshika hiyo pink ya {multi}x?",
+    "Hii round naweka {amount} KES yote.",
+    "Slow and steady, just took {amount} KES.",
+    "Weh, I almost waited for {multi}x!",
+    "That was a quick {amount} Bob.",
+    "Who else is making money today? 💸",
+    "Nimeshinda {amount} Ksh, asante sana!",
+    "Waiting for the next flight ✈️",
+    "Can't complain, 2x is good profit.",
+    "I should have held to {multi}x 🤦‍♂️",
+    "Mpesa is ringing! {amount} KES in.",
+    "Hii app iko sawa, instant withdrawal ya {amount} Bob.",
+    "Target acquired: {multi}x.",
+    "Nani mwingine anangoja {multi}x?",
+    "Just doubled my {amount} Ksh.",
+    "Not bad for a quick game. Took my {amount} KES.",
+    "Leo ni siku yangu ya luck 🔥",
+    "I'm buying lunch with this {amount} Bob.",
+    "Pesa mkononi! Cashed out {amount} Ksh.",
+    "That {multi}x flew by so fast.",
+    "Mungu ni mwema, {amount} KES added to balance.",
+    "Let's go again, aiming for {multi}x.",
+    "Secure the bag! {amount} KES safely withdrawn.",
+    "Hii imenishinda, nilitoka at 1.5x.",
+    "Anyone seen a {multi}x today?",
+    "Naona nita-withdraw {amount} Ksh sasa hivi.",
+    "Profits only! Cashed out {amount} Bob.",
+    "Wacha ni-save hii {amount} KES.",
+    "My M-Pesa is happy today 🤑",
+    "Riding this one to {multi}x.",
+    "Hapo sawa! {amount} Ksh imeingia.",
+    "Don't be greedy guys, take your {amount} Bob.",
+    "Just bagged {amount} KES from that quick run.",
+    "Hii game inalipa vizuri sana.",
+    "I was praying it hits {multi}x 🙏",
+    "Mimi nacheza safe leo.",
+    "Wow, 5 consecutive wins! 🚀",
+    "That {amount} Ksh was too close.",
+    "Ukweli, I love this game. {amount} KES in.",
+    "Hii ndio inaitwa kuangukia! 🎉",
+    "Next target is strictly {multi}x.",
+    "Withdrawing {amount} Bob for my rent.",
+    "Enyewe pesa iko hapa. Cashed out {amount} Ksh.",
+    "I'm done for today, {amount} KES is enough.",
+    "Nangoja iende juu sana ndio nitoe."
 ];
 
-// Generate exactly 300 unique messages for the bot to cycle through
 const botMessages = [];
-for (let i = 0; i < 300; i++) {
+for (let i = 0; i < 500; i++) {
     const randomName = kenyanNames[Math.floor(Math.random() * kenyanNames.length)];
     const randomTemplate = chatTemplates[Math.floor(Math.random() * chatTemplates.length)];
-    const randomAmount = (Math.floor(Math.random() * 100) + 5) * 50; // Random amount between 250 and 5000
-    const randomMulti = (Math.random() * 8 + 1.2).toFixed(2); // Random multiplier between 1.20x and 9.20x
+    const randomAmount = (Math.floor(Math.random() * 100) + 5) * 50; 
+    const randomMulti = (Math.random() * 8 + 1.2).toFixed(2); 
     botMessages.push(`${randomName}: ${randomTemplate.replace("{amount}", randomAmount).replace("{multi}", randomMulti)}`);
 }
 
