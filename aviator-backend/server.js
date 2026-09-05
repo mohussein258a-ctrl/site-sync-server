@@ -158,18 +158,26 @@ app.post('/api/payhero/callback', async (req, res) => {
         const payload = req.body;
         console.log("🔔 PayHero Webhook Received:", JSON.stringify(payload));
         
-        // Ensure robust extraction from various Safaricom/PayHero callback structures
-        const stkCallback = payload?.Body?.stkCallback || payload?.stkCallback || payload;
+        // Extract data based on PayHero's nested 'response' structure
+        const dataObj = payload.response || payload.Body?.stkCallback || payload.stkCallback || payload;
         
-        // Added payload.checkout_request_id for PayHero v2
-        const checkoutRequestId = stkCallback.CheckoutRequestID || payload.CheckoutRequestID || payload.checkout_request_id;
+        // Safely extract IDs to find the transaction in the database
+        const checkoutRequestId = dataObj.CheckoutRequestID || dataObj.checkout_request_id || payload.CheckoutRequestID || payload.checkout_request_id;
+        const externalReference = dataObj.ExternalReference || dataObj.external_reference || dataObj.reference || payload.reference || payload.ExternalReference;
         
-        // Added payload.reference to accurately match your DB record
-        const externalReference = payload.ExternalReference || payload.external_reference || payload.reference || stkCallback.ExternalReference;
+        // Safely extract success indicators
+        const resultCode = dataObj.ResultCode !== undefined ? dataObj.ResultCode : payload.ResultCode;
+        const statusStr = dataObj.Status || dataObj.status || payload.status;
+        const paymentSuccess = dataObj.paymentSuccess !== undefined ? dataObj.paymentSuccess : payload.paymentSuccess;
         
-        const resultCode = stkCallback.ResultCode !== undefined ? stkCallback.ResultCode : (payload.ResultCode !== undefined ? payload.ResultCode : payload.result_code);
-        
-        const isSuccess = (resultCode === 0 || resultCode === "0" || String(payload.status).toLowerCase() === "success" || String(payload.status).toLowerCase() === "completed");
+        // Determine if the transaction was successful
+        const isSuccess = (
+            resultCode === 0 || 
+            resultCode === "0" || 
+            String(statusStr).toLowerCase() === "success" || 
+            String(statusStr).toLowerCase() === "completed" ||
+            paymentSuccess === true
+        );
 
         let deposit = null;
         let tax = null;
@@ -210,7 +218,7 @@ app.post('/api/payhero/callback', async (req, res) => {
         res.status(200).json({ success: true, message: "Callback processed successfully" });
     } catch (err) {
         console.error("❌ Callback Processing Error:", err);
-        res.status(500).send("Error");
+        res.status(500).send("Error processing callback");
     }
 });
 
@@ -454,4 +462,3 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Aviator Server running on port ${PORT}`);
 });
-                                       
