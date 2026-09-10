@@ -409,12 +409,12 @@ setInterval(() => {
     intervalCount++;
     if (intervalCount > 6) intervalCount = 1; 
 
-    if (intervalCount === 1) { forcedRoundsRemaining = 2; targetMinMultiplier = 90.00; }
+    if (intervalCount === 1) { forcedRoundsRemaining = 2; targetMinMultiplier = 75.00; }
     else if (intervalCount === 2) { forcedRoundsRemaining = 4; targetMinMultiplier = 30.00; }
-    else if (intervalCount === 3) { forcedRoundsRemaining = 3; targetMinMultiplier = 60.00; }
-    else if (intervalCount === 4) { forcedRoundsRemaining = 2; targetMinMultiplier = 40.00; } 
-    else if (intervalCount === 5) { forcedRoundsRemaining = 5; targetMinMultiplier = 20.00; } 
-    else if (intervalCount === 6) { forcedRoundsRemaining = 1; targetMinMultiplier = 100.00; } 
+    else if (intervalCount === 3) { forcedRoundsRemaining = 3; targetMinMultiplier = 43.00; }
+    else if (intervalCount === 4) { forcedRoundsRemaining = 2; targetMinMultiplier = 84.00; } 
+    else if (intervalCount === 5) { forcedRoundsRemaining = 5; targetMinMultiplier = 15.00; } 
+    else if (intervalCount === 6) { forcedRoundsRemaining = 2; targetMinMultiplier = 95.00; } 
 }, 1200000);
 
 function determineCrashPoint() {
@@ -475,7 +475,7 @@ const chatTemplates = [
     "Just cashed out {amount} KES! 💸",
     "Waiting for {multi}x 🚀",
     "Pesa zimeingia m-pesa 🎉",
-    "Wow, crashed too fast 😭",
+    "Hii kitu imebadilisha maisha yangu wallahi 😭",
     "Who else is riding to {multi}x?",
     "Nime-take off na {amount} Ksh.",
     "Today is a lucky day 🔥",
@@ -496,7 +496,7 @@ const chatTemplates = [
     "Nani ameweka {amount} KES?",
     "Hii round iende hadi {multi}x tu.",
     "Almost lost my {amount} Ksh! Phew 😅",
-    "Cashing out early, 2x is enough for me.",
+    "Cashing out early, 4x is enough for me.",
     "Wueh, hii game inabamba! Cashed out {amount} KES.",
     "Just hit {multi}x, I can't believe it!",
     "Mimi natoka at {multi}x, sitaki stress.",
@@ -510,7 +510,7 @@ const chatTemplates = [
     "Who else is making money today? 💸",
     "Nimeshinda {amount} Ksh, asante sana!",
     "Waiting for the next flight ✈️",
-    "Can't complain, 2x is good profit.",
+    "Can't complain, 3x is good profit.",
     "I should have held to {multi}x 🤦‍♂️",
     "Mpesa is ringing! {amount} KES in.",
     "Hii app iko sawa, instant withdrawal ya {amount} Bob.",
@@ -518,7 +518,7 @@ const chatTemplates = [
     "Nani mwingine anangoja {multi}x?",
     "Just doubled my {amount} Ksh.",
     "Not bad for a quick game. Took my {amount} KES.",
-    "Leo ni siku yangu ya luck 🔥",
+    "Leo ni siku yangu aisee 🔥",
     "I'm buying lunch with this {amount} Bob.",
     "Pesa mkononi! Cashed out {amount} Ksh.",
     "That {multi}x flew by so fast.",
@@ -535,7 +535,7 @@ const chatTemplates = [
     "Hapo sawa! {amount} Ksh imeingia.",
     "Don't be greedy guys, take your {amount} Bob.",
     "Just bagged {amount} KES from that quick run.",
-    "Hii game inalipa vizuri sana.",
+    "Mungu asante, Mpesa inasoma vizuri 🙏.",
     "I was praying it hits {multi}x 🙏",
     "Mimi nacheza safe leo.",
     "Wow, 5 consecutive wins! 🚀",
