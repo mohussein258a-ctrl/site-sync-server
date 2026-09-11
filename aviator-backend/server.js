@@ -409,12 +409,12 @@ setInterval(() => {
     intervalCount++;
     if (intervalCount > 6) intervalCount = 1; 
 
-    if (intervalCount === 1) { forcedRoundsRemaining = 2; targetMinMultiplier = 75.00; }
-    else if (intervalCount === 2) { forcedRoundsRemaining = 4; targetMinMultiplier = 30.00; }
-    else if (intervalCount === 3) { forcedRoundsRemaining = 3; targetMinMultiplier = 43.00; }
+    if (intervalCount === 1) { forcedRoundsRemaining = 2; targetMinMultiplier = 65.00; }
+    else if (intervalCount === 2) { forcedRoundsRemaining = 4; targetMinMultiplier = 28.00; }
+    else if (intervalCount === 3) { forcedRoundsRemaining = 3; targetMinMultiplier = 53.00; }
     else if (intervalCount === 4) { forcedRoundsRemaining = 2; targetMinMultiplier = 84.00; } 
-    else if (intervalCount === 5) { forcedRoundsRemaining = 5; targetMinMultiplier = 15.00; } 
-    else if (intervalCount === 6) { forcedRoundsRemaining = 2; targetMinMultiplier = 95.00; } 
+    else if (intervalCount === 5) { forcedRoundsRemaining = 3; targetMinMultiplier = 14.00; } 
+    else if (intervalCount === 6) { forcedRoundsRemaining = 2; targetMinMultiplier = 85.00; } 
 }, 1200000);
 
 function determineCrashPoint() {
@@ -487,7 +487,7 @@ const chatTemplates = [
     "Mpesa message received 📱",
     "Let's fly high ✈️",
     "Cashed out at {multi}x safely.",
-    "I need 10x today!",
+    "I need 50x today!",
     "Good profit: {amount} KES in the bag.",
     "Boom! {multi}x hit! 🎉",
     "Taking my {amount} Ksh and leaving.",
@@ -496,7 +496,7 @@ const chatTemplates = [
     "Nani ameweka {amount} KES?",
     "Hii round iende hadi {multi}x tu.",
     "Almost lost my {amount} Ksh! Phew 😅",
-    "Cashing out early, 4x is enough for me.",
+    "Cashing out early, 5x is enough for me.",
     "Wueh, hii game inabamba! Cashed out {amount} KES.",
     "Just hit {multi}x, I can't believe it!",
     "Mimi natoka at {multi}x, sitaki stress.",
