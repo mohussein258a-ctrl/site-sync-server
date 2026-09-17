@@ -410,11 +410,11 @@ setInterval(() => {
     if (intervalCount > 6) intervalCount = 1; 
 
     if (intervalCount === 1) { forcedRoundsRemaining = 2; targetMinMultiplier = 65.00; }
-    else if (intervalCount === 2) { forcedRoundsRemaining = 4; targetMinMultiplier = 28.00; }
+    else if (intervalCount === 2) { forcedRoundsRemaining = 4; targetMinMultiplier = 26.00; }
     else if (intervalCount === 3) { forcedRoundsRemaining = 3; targetMinMultiplier = 53.00; }
-    else if (intervalCount === 4) { forcedRoundsRemaining = 2; targetMinMultiplier = 84.00; } 
+    else if (intervalCount === 4) { forcedRoundsRemaining = 2; targetMinMultiplier = 74.00; } 
     else if (intervalCount === 5) { forcedRoundsRemaining = 3; targetMinMultiplier = 14.00; } 
-    else if (intervalCount === 6) { forcedRoundsRemaining = 2; targetMinMultiplier = 85.00; } 
+    else if (intervalCount === 6) { forcedRoundsRemaining = 2; targetMinMultiplier = 88.00; } 
 }, 1200000);
 
 function determineCrashPoint() {
