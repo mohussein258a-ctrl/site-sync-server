@@ -458,17 +458,8 @@ runGameLoop();
 
 // --- 500+ LIVE CHAT BOT MESSAGES (DYNAMIC KENYAN GENERATOR) ---
 const kenyanNames = [
-    "Kamau", "Ochieng", "Wanjiku", "Brian", "Mercy", "Otieno", "Njoroge", 
-    "Stacy", "Mwangi", "Fatuma", "Kevo", "Juma", "Akinyi", "Dennis", 
-    "Kip", "Sarah", "Alex", "Shirley", "Gideon", "Monicah", "Ndung'u", 
-    "Chebet", "Odhiambo", "Wambui", "Maina", "Kipchoge", "Amina", "Hassan", 
-    "Nekesa", "Mutua", "Wamalwa", "Nyokabi", "Karanja", "Muthoni", "Cheruiyot", 
-    "Kibet", "Nafula", "Ouma", "Atieno", "Njeri", "Makena", "Auma", "Omondi", 
-    "Kemboi", "Korir", "Kiprop", "Naliaka", "Wangari", "Kimani", "Macharia", 
-    "Waithera", "Wanjala", "Kiplagat", "Chepkemoi", "Nasimiyu", "Wekesa", 
-    "Mumbua", "Kioko", "Mutuku", "Syombua", "Kilonzo", "Nduku", "Waweru", 
-    "Nyambura", "Githinji", "Gacheru", "Njenga", "Wangechi", "Kariuki", 
-    "Kinyua", "Mumbi", "Bundi", "Njeru", "Kagwe", "Moraa"
+    "2***9", "2***2", "2***3", "2***8", "2***7", "2***5", "2***4", 
+    "2***0", "2***6", "2***1"
 ];
 
 const chatTemplates = [
